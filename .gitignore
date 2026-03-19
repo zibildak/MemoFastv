@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Güvenlik - Hassas dosyalar
+.secure/
+settings.json
+.coverage
+
+# Geçici dosyalar
+temp/
+temp_manual/
+temp_unpack/
+*.bak
+*.tmp
+.logs/
+.cache/
+.pytest_cache/
+htmlcov/
+
+# Yedekler
+.backup/
+*_BROKEN.py.bak
+*_CLEAN.py
+
+# Büyük binary'ler
+python_enbed/
+tesseract/
+libs/bin/
+libs/watchdog/
+libs/watchdog-6.0.0.dist-info/
+libs/dns/
+
+# Paketleme
+NewYama/
+Patch_Folder/
+ping_booster_dev/
+
+# Diğer
+*.exe
+*.dll
+*.so
+*.log
+
+# Gemini agent
+.agent/
+.gemini/

@@ -1,0 +1,17 @@
+{
+    "version": "1.1.8",
+    "bulletin": "MemoFast v1.1.2 ile arayüz artık çok daha hızlı!",
+    "bulletin_type": "success",
+    "force_update": true,
+    "changelog": [
+        "Unity oyunlarda çevrilmeyen yeni nasil oyunlar için daha üst düzey paketler eklendi",
+        "Memofast açılırken 2 kere açılma sorunu düzeltildi",
+        "Bilgisayardaki oyunları daha kapsamlı arama özelliği eklendi (Epic Games)"
+    ],
+    "files": [
+        {
+            "url": "https://github.com/zibildak/memofast/releases/download/memofast070226up/MemoFast.1.1.2update.zip",
+            "target_path": "."
+        }
+    ]
+}

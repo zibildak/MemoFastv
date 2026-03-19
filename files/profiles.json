@@ -1,0 +1,36 @@
+{
+    "REKA": {
+        "display_name": "Reka",
+        "compatibility_score": 85,
+        "special_settings": {
+            "xunity_delay": 10,
+            "bepinex_preloader": false
+        },
+        "user_message": "İlk açılışta kısa bir gecikme olabilir (Optimize Edildi)",
+        "last_tested": "2024-12-24"
+    },
+    "Coral Island": {
+        "display_name": "Coral Island",
+        "special_settings": {
+            "xunity_delay": 5
+        },
+        "user_message": "Yavaş başlangıç için optimizasyon uygulandı."
+    },
+    "Palworld": {
+        "display_name": "Palworld",
+        "special_settings": {
+            "xunity_delay": 8,
+            "font_replacement_needed": true
+        },
+        "user_message": "Font sorunu için özel ayarlar yapıldı."
+    },
+    "Dating Simulator": {
+        "display_name": "Dating Simulator",
+        "compatibility_score": 90,
+        "special_settings": {
+            "xunity_delay": 0,
+            "bepinex_preloader": false
+        },
+        "user_message": "Grafik hatalarını önlemek için Preloader kapatıldı."
+    }
+}

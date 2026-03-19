@@ -1,0 +1,31 @@
+# MemoFast 1.1.2 - Python Dependencies
+# Install: pip install -r requirements.txt
+
+# GUI Framework
+PyQt5>=5.15.0,<6.0.0
+
+# System & Process Tools
+psutil>=5.8.0
+
+# Image Processing
+Pillow>=8.0.0
+
+# Encryption & Security
+cryptography>=3.4.0
+
+# Translation
+deep-translator>=1.8.0
+requests>=2.26.0
+
+# Unity Asset Extraction
+UnityPy>=1.10.0
+
+# Development & Testing (Optional)
+# pytest>=6.2.0
+# PyInstaller>=4.5.0
+
+# Notes:
+# - pymem: Binary wheels in files/libs/
+# - pytesseract: Requires Tesseract-OCR installation
+# - deepl-python: Alternative to deep-translator
+#   pip install deepl  # If using DeepL API directly
