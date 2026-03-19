@@ -43,18 +43,30 @@
 
 ---
 
-## 📦 Kurulum
+## 📦 İndirme & Kurulum
 
-### Gereksinimler
-- Windows 10/11
-- Python 3.8+
+### 🎯 Hazır Sürüm (Önerilen)
 
-### Adımlar
+Python bilmiyorsanız direkt indirip kullanabilirsiniz:
+
+<p align="center">
+  <a href="https://github.com/zibildak/memofast/releases/download/memofast1.1.2/MemoFast.1.1.2.zip">
+    <img src="https://img.shields.io/badge/⬇️_İndir-MemoFast_v1.1.2-00cc66?style=for-the-badge&logo=windows" alt="Download">
+  </a>
+</p>
+
+1. ZIP dosyasını indirin
+2. Bir klasöre çıkarın
+3. `MemoFast.exe` çalıştırın — bu kadar!
+
+---
+
+### 🛠️ Kaynak Koddan Çalıştırma (Geliştiriciler İçin)
 
 ```bash
 # 1. Repoyu klonla
-git clone https://github.com/KULLANICI_ADIN/MemoFast.git
-cd MemoFast
+git clone https://github.com/zibildak/MemoFastv.git
+cd MemoFastv
 
 # 2. Bağımlılıkları kur
 pip install -r requirements.txt
@@ -63,8 +75,7 @@ pip install -r requirements.txt
 python memofast_gui.py
 ```
 
-### 📋 Bağımlılıklar
-Temel bağımlılıklar `requirements.txt` dosyasında listelenmiştir.
+**Gereksinimler:** Windows 10/11, Python 3.8+
 
 ---
 
