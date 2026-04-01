@@ -2,10 +2,10 @@
   <img src="assets/app_icon.png" width="120" alt="MemoFast Logo">
 </p>
 
-<h1 align="center">🎮 MemoFast - Oyun Çeviri & Optimizasyon Aracı</h1>
+<h1 align="center">🎮 MemoFast - Game Translation & Optimization Tool</h1>
 
 <p align="center">
-  <b>Oyunlarınızı Türkçe'ye çevirin, optimize edin ve yamalayın!</b>
+  <b>Translate your games to Turkish, optimize, and patch them!</b>
 </p>
 
 <p align="center">
@@ -17,126 +17,126 @@
 
 ---
 
-## 🚀 Özellikler
+## 🚀 Features
 
-### 🔄 Çoklu Motor Desteği
-- **Unreal Engine** → PAK dosyası açma, çevirme ve paketleme (AES key otomatik bulma)
-- **Unity Engine** → Asset bundle çevirisi, font düzeltme
-- **Cobra Engine** → Planet Zoo, Jurassic World vb. OVL çevirisi
+### 🔄 Multi-Engine Support
+- **Unreal Engine** → Open, translate, and repackage PAK files (automatic AES key detection)
+- **Unity Engine** → Asset bundle translation, font fixing
+- **Cobra Engine** → OVL translation for Planet Zoo, Jurassic World, etc.
 
-### 🌍 Çeviri Motorları
-- **Google Translate** → Ücretsiz, hızlı
-- **DeepL** → Yüksek kaliteli çeviri
-- **Gemini AI** → Bağlam duyarlı akıllı çeviri
+### 🌍 Translation Engines
+- **Google Translate** → Free, fast
+- **DeepL** → High-quality translation
+- **Gemini AI** → Context-aware intelligent translation
 
-### 🖥️ Ekran Çeviri (OCR)
-- Oyun içi metin tanıma ve anlık çeviri
-- Windows OCR, Tesseract ve EasyOCR desteği
-- Sesli okuma (TTS) özelliği
-- Kısayol tuşlarıyla hızlı kullanım
+### 🖥️ Screen Translation (OCR)
+- In-game text recognition and instant translation
+- Support for Windows OCR, Tesseract, and EasyOCR
+- Text-to-speech (TTS) feature
+- Quick access with hotkeys
 
-### 🎯 Ek Araçlar
-- **Oyun Tarayıcı** → Steam, Epic Games, GOG ve Xbox oyunlarını otomatik bulma
-- **Yedekleme Merkezi** → Orijinal dosyaları yedekleme/geri yükleme
-- **Otomatik Güncelleme** → Uygulama güncellemelerini otomatik kontrol
-- **Oyun Optimizasyonu** → Performans iyileştirme araçları
+### 🎯 Additional Tools
+- **Game Scanner** → Auto-detect games from Steam, Epic Games, GOG, and Xbox
+- **Backup Center** → Backup/restore original files
+- **Auto Updates** → Automatic application update checks
+- **Game Optimization** → Performance improvement tools
 
 ---
 
-## 📦 İndirme & Kurulum
+## 📦 Download & Installation
 
-### 🎯 Hazır Sürüm (Önerilen)
+### 🎯 Pre-built Release (Recommended)
 
-Python bilmiyorsanız direkt indirip kullanabilirsiniz:
+If you don't know Python, you can download and use it directly:
 
 <p align="center">
   <a href="https://github.com/zibildak/memofast/releases/download/memofast1.1.2/MemoFast.1.1.2.zip">
-    <img src="https://img.shields.io/badge/⬇️_İndir-MemoFast_v1.1.2-00cc66?style=for-the-badge&logo=windows" alt="Download">
+    <img src="https://img.shields.io/badge/⬇️_Download-MemoFast_v1.1.2-00cc66?style=for-the-badge&logo=windows" alt="Download">
   </a>
 </p>
 
-1. ZIP dosyasını indirin
-2. Bir klasöre çıkarın
-3. `MemoFast.exe` çalıştırın — bu kadar!
+1. Download the ZIP file
+2. Extract it to a folder
+3. Run `MemoFast.exe` — that's it!
 
 ---
 
-### 🛠️ Kaynak Koddan Çalıştırma (Geliştiriciler İçin)
+### 🛠️ Running from Source Code (For Developers)
 
 ```bash
-# 1. Repoyu klonla
+# 1. Clone the repository
 git clone https://github.com/zibildak/MemoFastv.git
 cd MemoFastv
 
-# 2. Bağımlılıkları kur
+# 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Çalıştır
+# 3. Run the application
 python memofast_gui.py
 ```
 
-**Gereksinimler:** Windows 10/11, Python 3.8+
+**Requirements:** Windows 10/11, Python 3.8+
 
 ---
 
-## 🖼️ Ekran Görüntüleri
+## 🖼️ Screenshots
 
-> Yakında eklenecek...
+> Coming soon...
 
 ---
 
-## 📁 Proje Yapısı
+## 📁 Project Structure
 
 ```
 MemoFast/
-├── memofast_gui.py        # Ana GUI uygulaması
-├── unreal_manager.py      # Unreal Engine çeviri motoru
-├── unity_manager.py       # Unity Engine çeviri motoru
-├── cobra_manager.py       # Cobra Engine çeviri motoru
-├── translator_manager.py  # BepInEx/MelonLoader kurulumu
-├── scanner.py             # Oyun tarayıcı
-├── screen_translator.py   # OCR ekran çeviri
-├── patcher.py             # Yedekleme ve yama
-├── config.py              # Ayarlar ve sabitler
-├── logger.py              # Loglama sistemi
-├── app_updater.py         # Otomatik güncelleme
-├── crypto_manager.py      # Şifreleme yöneticisi
-├── security_utils.py      # Güvenlik araçları
-├── deepl_helper.py        # DeepL API yardımcısı
-├── requirements.txt       # Python bağımlılıkları
-└── gui/                   # GUI bileşenleri
-    ├── dialogs/           # Diyalog pencereleri
-    ├── widgets/           # Özel widget'lar
-    ├── pages/             # Sayfa bileşenleri
-    └── styles/            # Tema ve stiller
+├── memofast_gui.py        # Main GUI application
+├── unreal_manager.py      # Unreal Engine translation engine
+├── unity_manager.py       # Unity Engine translation engine
+├── cobra_manager.py       # Cobra Engine translation engine
+├── translator_manager.py  # BepInEx/MelonLoader installation
+├── scanner.py             # Game scanner
+├── screen_translator.py   # OCR screen translation
+├── patcher.py             # Backup and patching
+├── config.py              # Settings and constants
+├── logger.py              # Logging system
+├── app_updater.py         # Auto-update feature
+├── crypto_manager.py      # Encryption manager
+├── security_utils.py      # Security tools
+├── deepl_helper.py        # DeepL API helper
+├── requirements.txt       # Python dependencies
+└── gui/                   # GUI components
+    ├── dialogs/           # Dialog windows
+    ├── widgets/           # Custom widgets
+    ├── pages/             # Page components
+    └── styles/            # Themes and styles
 ```
 
 ---
 
-## 🤝 Katkıda Bulunma
+## 🤝 Contributing
 
-Katkılarınızı bekliyoruz! 
+We welcome your contributions!
 
-1. Bu repoyu **fork**'layın
-2. Yeni bir **branch** oluşturun (`git checkout -b yeni-ozellik`)
-3. Değişikliklerinizi **commit**'leyin (`git commit -m 'Yeni özellik eklendi'`)
-4. Branch'inizi **push**'layın (`git push origin yeni-ozellik`)
-5. **Pull Request** açın
+1. **Fork** this repository
+2. Create a new **branch** (`git checkout -b new-feature`)
+3. **Commit** your changes (`git commit -m 'Add new feature'`)
+4. **Push** your branch (`git push origin new-feature`)
+5. Open a **Pull Request**
 
 ---
 
-## 📺 İletişim
+## 📺 Contact
 
 - **YouTube**: [@MehmetariTv](https://www.youtube.com/@MehmetariTv)
 
 ---
 
-## 📄 Lisans
+## 📄 License
 
-Bu proje [MIT Lisansı](LICENSE) ile lisanslanmıştır.
+This project is licensed under the [MIT License](LICENSE).
 
 ---
 
 <p align="center">
-  ⭐ Beğendiyseniz yıldız vermeyi unutmayın!
+  ⭐ Don't forget to star if you like it!
 </p>
