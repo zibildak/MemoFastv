@@ -4,6 +4,7 @@ Tüm modüllerin log dosyalarını merkezi olarak yönetir.
 """
 import logging
 import sys
+import os
 from pathlib import Path
 from datetime import datetime
 
@@ -25,8 +26,10 @@ class LoggerManager:
         if self._initialized:
             return
         
-        self.log_dir = Path(__file__).parent / ".logs"
-        self.log_dir.mkdir(exist_ok=True)
+        # AppData klasörünü kullan (yazma izni garantili)
+        appdata = Path(os.getenv("APPDATA")) / "MemoFast"
+        self.log_dir = appdata / ".logs"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
         
         # Ana log dosyası
         self.main_log_file = self.log_dir / f"memofast_{datetime.now().strftime('%Y%m%d')}.log"

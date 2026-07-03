@@ -8,6 +8,7 @@ import ssl
 from pathlib import Path
 from config import Config
 from logger import setup_logger
+from security_utils import safe_extract_zip
 
 logger = setup_logger(__name__)
 
@@ -635,7 +636,173 @@ class TranslatorManager:
         }
 
     @staticmethod
-    def install(game_exe_path, service="google", api_key="", progress_callback=None, target_bepinex_zip=None, target_translator_zip=None, loader_type="bepinex", target_lang="tr"):
+    @staticmethod
+    def ai_select_tools(match_data, api_key, model_name="models/gemini-2.5-flash"):
+        """
+        Gemini ile oyun verilerini analiz edip en uygun araçları seçer.
+        
+        Args:
+            match_data: dict - get_compatible_tools() çıktısı
+            api_key: str - Gemini API key
+            model_name: str - Kullanılacak Gemini modeli (settings.json'dan)
+        
+        Returns:
+            tuple: (dict veya None, str_hata_mesajı)
+        """
+        import json
+        try:
+            import requests
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        except ImportError:
+            return None, "requests kütüphanesi bulunamadı"
+        
+        try:
+            # Mevcut dosyaları isim listesine dönüştür
+            all_files = match_data.get("all_files", {})
+            file_list = []
+            for category, files in all_files.items():
+                for f in files:
+                    fname = f.name if hasattr(f, 'name') else str(f)
+                    if fname not in file_list:
+                        file_list.append(fname)
+            
+            if not file_list:
+                return None, "Dosya listesi boş (Analiz edilecek araç yok)"
+            
+            # Oyun verilerini hazırla
+            arch = match_data.get("arch", "x64")
+            backend = match_data.get("backend", "mono")
+            unity_ver = match_data.get("unity_version", "Unknown")
+            dotnet = match_data.get("dotnet_runtime", "unknown")
+            anticheat = match_data.get("anticheat", [])
+            unity_year = match_data.get("unity_year", 0)
+            is_unity_6 = match_data.get("is_unity_6", False)
+            
+            prompt = (
+                f"Sen kıdemli bir Unity Tersine Mühendislik ve Modding Uzmanısın. "
+                f"Sana bir oyunun detaylı teknik altyapısını ve elimizdeki mevcut Mod Loader / Translator dosyalarının listesini vereceğim.\n\n"
+                f"GÖREVİN:\n"
+                f"Sahip olduğun derin Unity (Mono/IL2CPP), BepInEx ve MelonLoader uyumluluk bilginle (know-how) bu oyun için en kusursuz ve stabil çalışacak kombinasyonu bulmak.\n"
+                f"Oyunun Unity sürümünü (örneğin Unity 6/6000.x, 2021, 2019 vb.), mimarisini (x64/x86), .NET yapısını ve backend'ini analiz et.\n"
+                f"Örneğin; hangi Unity sürümlerinde MelonLoader'ın hangi versiyonunun daha iyi çalıştığını, hangi backend'lerde BepInEx'in zorunlu veya sorunlu olduğunu tamamen kendi bilgi birikiminle mantıksal olarak değerlendir.\n"
+                f"Elimizdeki dosya listesinden oyunun mimarisiyle (x64 vb.) eşleşen, versiyon olarak en sorunsuz deneyimi sunacak Loader'ı ve bu Loader ile uyumlu (IL2CPP veya Standart) AutoTranslator eklentisini seç.\n\n"
+                f"OYUNUN TEKNİK ANALİZİ:\n"
+                f"- Mimari: {arch}\n"
+                f"- Backend: {backend}\n"
+                f"- Unity Versiyonu: {unity_ver}\n"
+                f"- Unity Yılı: {unity_year}\n"
+                f"- Unity 6+: {is_unity_6}\n"
+                f"- .NET Runtime: {dotnet}\n"
+                f"- Anti-Cheat: {', '.join(anticheat) if anticheat else 'Yok'}\n\n"
+                f"MEVCUT DOSYALAR (bunlardan birini seçmelisin):\n"
+            )
+            prompt += "\n".join(file_list)
+            prompt += (
+                f"\n\nSADECE aşağıdaki JSON formatında cevap ver, başka hiçbir şey yazma:\n"
+                f'{{"loader_type": "bepinex" veya "melon", "loader_file": "seçtiğin dosya adı", '
+                f'"translator_file": "seçtiğin translator dosya adı", "reason": "kısa türkçe açıklama"}}'
+            )
+            
+            # Modeli settings'den alıyoruz
+            model_id = model_name
+            if not model_id.startswith("models/"):
+                model_id = f"models/{model_id}"
+            
+            # API URL
+            api_version = "v1beta" if ("2.0" in model_id or "thinking" in model_id) else "v1"
+            url = f"https://generativelanguage.googleapis.com/{api_version}/{model_id}:generateContent?key={api_key}"
+            
+            headers = {'Content-Type': 'application/json'}
+            data = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.1,
+                    "maxOutputTokens": 4096
+                },
+                "safetySettings": [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+                ]
+            }
+            
+            max_retries = 3
+            for attempt in range(max_retries):
+                response = requests.post(url, headers=headers, json=data, timeout=30)
+                
+                if response.status_code == 200:
+                    break
+                elif response.status_code == 503 and attempt < max_retries - 1:
+                    import time
+                    print(f"⚠️ AI 503 Hatası (Sunucu yoğun), tekrar deneniyor... ({attempt+1}/{max_retries})")
+                    time.sleep(2)  # 2 saniye bekle ve tekrar dene
+                    continue
+                else:
+                    error_detail = ""
+                    try:
+                        error_detail = response.json().get("error", {}).get("message", response.text[:200])
+                    except:
+                        error_detail = response.text[:200]
+                    return None, f"API Hatası ({response.status_code}): {error_detail}"
+            
+            result = response.json()
+            
+            # Candidates kontrolü
+            candidates = result.get("candidates", [])
+            if not candidates:
+                return None, f"API Boş Yanıt Döndü: {result}"
+            
+            finish_reason = candidates[0].get("finishReason", "UNKNOWN")
+            
+            # Parts'tan metin çıkar
+            parts = candidates[0].get("content", {}).get("parts", [])
+            if not parts:
+                return None, f"API yanıtında metin (parts) bulunamadı. (FinishReason: {finish_reason})"
+            
+            # Tüm text parçalarını birleştir (thinking model ise sonuncuyu al)
+            if len(parts) > 1:
+                ai_text = parts[-1].get("text", "").strip()
+            else:
+                ai_text = "".join([p.get("text", "") for p in parts]).strip()
+            
+            if not ai_text:
+                return None, f"API boş metin döndü. (FinishReason: {finish_reason})"
+            
+            # JSON parse - markdown kalıntıları varsa temizle
+            if "```json" in ai_text:
+                ai_text = ai_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in ai_text:
+                ai_text = ai_text.split("```")[1].split("```")[0].strip()
+            
+            try:
+                ai_result = json.loads(ai_text)
+            except json.JSONDecodeError as e:
+                # Raw output'u tam göstermek için kısaltma yapmıyoruz
+                return None, f"JSON parse hatası: {e}\nDurma Sebebi (FinishReason): {finish_reason}\nRaw Yanıt:\n{ai_text}"
+            
+            # Doğrulama
+            if ai_result.get("loader_type") not in ("bepinex", "melon"):
+                return None, f"Geçersiz loader_type döndü: {ai_result.get('loader_type')}"
+            
+            # Dosya kontrolleri
+            loader_file = ai_result.get("loader_file", "")
+            translator_file = ai_result.get("translator_file", "")
+            
+            ai_result["loader_file_valid"] = bool(loader_file and loader_file in file_list)
+            ai_result["translator_file_valid"] = bool(translator_file and translator_file in file_list)
+            
+            logger.info(f"AI Araç Seçimi: {ai_result}")
+            return ai_result, None
+            
+        except requests.exceptions.Timeout:
+            return None, "İstek zaman aşımına uğradı (30s)"
+        except Exception as e:
+            return None, f"Beklenmeyen Hata: {str(e)}"
+
+    @staticmethod
+    def install(game_exe_path, service="google", api_key="", progress_callback=None, target_bepinex_zip=None, target_translator_zip=None, loader_type="bepinex", target_lang="tr", target_injector_zip=None, source_lang="en"):
         """Çeviri araçlarını seçilen oyuna kur (Loader Type: 'bepinex' veya 'melon')"""
         game_path = Path(game_exe_path).parent
         files = TranslatorManager.get_tool_files()
@@ -653,14 +820,41 @@ class TranslatorManager:
         translator_zip = target_translator_zip
         
         # Translator Seçimi
-        if not translator_zip:
-            if backend == "il2cpp":
-                translator_zip = files['translator_il2cpp'][0] if files['translator_il2cpp'] else None
-            else:
-                translator_zip = files['translator'][0] if files['translator'] else None
+        if translator_zip == "SKIP":
+            skip_translator = True
+            translator_zip = None
+        else:
+            skip_translator = False
+            if not translator_zip:
+                if backend == "il2cpp":
+                    translator_zip = files['translator_il2cpp'][0] if files['translator_il2cpp'] else None
+                else:
+                    translator_zip = files['translator'][0] if files['translator'] else None
+        
+        # UnityInjector Seçimi
+        if target_injector_zip == "SKIP":
+            skip_injector = True
+            target_injector_zip = None
+        else:
+            skip_injector = False
         
         # BepInEx Seçimi
-        if not bepinex_zip:
+        if bepinex_zip == "SKIP":
+            skip_bepinex = True
+            bepinex_zip = None
+        else:
+            skip_bepinex = False
+        if skip_bepinex:
+            bepinex_zip = None
+        elif bepinex_zip and str(bepinex_zip).startswith("DOWNLOAD_BEPINEX:"):
+            # DOWNLOAD_BEPINEX:https://... (URL contains another colon)
+            dl_url = str(bepinex_zip).replace("DOWNLOAD_BEPINEX:", "", 1)
+            bepinex_zip = TranslatorManager.download_bepinex_build(dl_url, progress_callback)
+            if not bepinex_zip:
+                raise FileNotFoundError("Güncel BepInEx sürümü indirilemedi!")
+            bepinex_zip = Path(bepinex_zip)
+            
+        if not skip_bepinex and not bepinex_zip:
             if backend == "il2cpp":
                 # IL2CPP: Yıla Göre Seçim (Modern vs Legacy)
                 is_modern = False
@@ -769,7 +963,7 @@ class TranslatorManager:
                     raise FileNotFoundError(f"MelonLoader ZIP dosyası bulunamadı: {melon_zip_path}")
                 
                 with zipfile.ZipFile(melon_zip_path, 'r') as z:
-                    z.extractall(game_path)
+                    safe_extract_zip(z, game_path)
                 if progress_callback: progress_callback("✅ MelonLoader dosyaları çıkarıldı.")
 
                 # 3. XUnity AutoTranslator Kurulumu
@@ -808,7 +1002,7 @@ class TranslatorManager:
                 if xunity_zip and xunity_zip.exists():
                     if progress_callback: progress_callback(f"📦 XUnity AutoTranslator bulundu: {xunity_zip.name}")
                     with zipfile.ZipFile(xunity_zip, 'r') as z:
-                        z.extractall(game_path)
+                        safe_extract_zip(z, game_path)
                     if progress_callback: progress_callback("✅ XUnity AutoTranslator kuruldu.")
                 else:
                     if progress_callback: progress_callback("⚠️ UYARI: Uygun XUnity AutoTranslator zip dosyası bulunamadı!")
@@ -853,6 +1047,12 @@ MinFuzzyMatching=5
 MaxFuzzyMatching=50
 MinDelay=1.5
 """
+                elif service == "gemini":
+                    endpoint = "GeminiTranslate"
+                    extra_section = f"""
+[GeminiTranslate]
+ApiKey={api_key.strip()}
+"""
                 
                 config_content = f"""[Service]
 Endpoint={endpoint}
@@ -860,7 +1060,7 @@ FallbackEndpoint=
 
 [General]
 Language={target_lang}
-FromLanguage=en
+FromLanguage={source_lang}
 
 [Behaviour]
 MaxTranslationsBeforeShutdown=4000
@@ -895,9 +1095,7 @@ EnableTextMesh=True
             except Exception as e:
                 raise e
         # --- BEPINEX PATH (Existing Logic) ---
-        bepinex_zip = target_bepinex_zip
-        # ... logic continues below ...
-        
+        # The bepinex_zip variable is already resolved at the top of this function.
         if progress_callback: progress_callback("🧹 BepInEx dosyaları hazırlanıyor...") # Replaced old cleaning logic below
         
         # (Existing BepInEx Logic Follows)
@@ -920,19 +1118,27 @@ EnableTextMesh=True
                 except: pass
 
         # 3. BepInEx Kurulumu
-        with zipfile.ZipFile(bepinex_zip, 'r') as zip_ref:
-            zip_ref.extractall(game_path)
-        if progress_callback: progress_callback("- BepInEx kuruldu.")
+        if bepinex_zip and (isinstance(bepinex_zip, Path) or (isinstance(bepinex_zip, str) and os.path.exists(bepinex_zip))):
+            with zipfile.ZipFile(bepinex_zip, 'r') as zip_ref:
+                safe_extract_zip(zip_ref, game_path)
+            if progress_callback: progress_callback("- BepInEx kuruldu.")
             
         # 4. AutoTranslator Kurulumu
-        with zipfile.ZipFile(translator_zip, 'r') as zip_ref:
-            zip_ref.extractall(game_path)
-        if progress_callback: progress_callback(f"- AutoTranslator ({'IL2CPP' if backend=='il2cpp' else 'Mono'}) kuruldu.")
+        if translator_zip and (isinstance(translator_zip, Path) or (isinstance(translator_zip, str) and os.path.exists(translator_zip))):
+            with zipfile.ZipFile(translator_zip, 'r') as zip_ref:
+                safe_extract_zip(zip_ref, game_path)
+            if progress_callback: progress_callback(f"- AutoTranslator ({'IL2CPP' if backend=='il2cpp' else 'Mono'}) kuruldu.")
+            
+        # [YENİ] UnityInjector Eklentisi Kurulumu
+        if target_injector_zip and (isinstance(target_injector_zip, Path) or (isinstance(target_injector_zip, str) and os.path.exists(target_injector_zip))):
+            with zipfile.ZipFile(target_injector_zip, 'r') as zip_ref:
+                safe_extract_zip(zip_ref, game_path)
+            if progress_callback: progress_callback(f"- UnityInjector modülü kuruldu.")
             
         # [CRITICAL FIX] XUnity zip'i içinde eski bir winhttp.dll veya doorstop_config.ini varsa,
         # az önce kurduğumuz BepInEx 6 BE sürümünü bozmuş olabilir.
         # Bu yüzden kritik dosyaları BepInEx zip'inden TEKRAR çıkartıyoruz.
-        if backend == "il2cpp":
+        if backend == "il2cpp" and bepinex_zip and (isinstance(bepinex_zip, Path) or (isinstance(bepinex_zip, str) and os.path.exists(bepinex_zip))):
             with zipfile.ZipFile(bepinex_zip, 'r') as zip_ref:
                 for file_name in ["winhttp.dll", "doorstop_config.ini", "version.dll"]:
                     if file_name in zip_ref.namelist():
@@ -960,10 +1166,23 @@ EnableTextMesh=True
              special_settings = comps.get("special_settings", {})
         except: pass
         
-        # B) AutoTranslator Config (BepInEx Path)
-        config_dir = game_path / "BepInEx" / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        at_cfg = config_dir / "AutoTranslatorConfig.ini"
+        # B) AutoTranslator Config Tespiti
+        # Klasörün o an var olup olmamasına bakmaksızın tüm muhtemel yolları hazırla
+        at_configs = [
+            game_path / "BepInEx" / "config" / "AutoTranslatorConfig.ini",
+            game_path / "AutoTranslator" / "Config.ini",
+            game_path / "UserData" / "AutoTranslatorConfig.ini"
+        ]
+        
+        # Ek olarak klasör varsa içindeki alternatif isimleri de tara
+        config_dirs = [game_path / "BepInEx" / "config", game_path / "AutoTranslator", game_path / "UserData"]
+        for d in config_dirs:
+            if d.exists():
+                at_configs.append(d / "AutoTranslatorConfig.ini")
+                at_configs.append(d / "Config.ini")
+        
+        # Duplicate'leri temizle
+        at_configs = list(set(at_configs))
         
         # Servis ayarı (MelonLogic formatıyla paralel)
         endpoint = "GoogleTranslateV2"
@@ -978,8 +1197,13 @@ EnableTextMesh=True
                 endpoint = "DeepLTranslate"
                 extra_section = "\n[DeepLTranslate]\nMinDelay=1.5\n"
         elif service == "gemini":
-            endpoint = "GeminiTranslate"
-            extra_section = f"\n[GeminiTranslate]\nApiKey={api_key.strip()}\n"
+            endpoint = "CustomTranslate"
+            extra_section = f"\n[GeminiTranslate]\nApiKey={api_key.strip()}\n\n[Custom]\nUrl=http://127.0.0.1:5001/translate\n"
+        elif service == "local_ai":
+            # XUnity'nin yerel bir Llama endpoint'i yok, bu yüzden Google'ı fallback olarak ayarla
+            # ancak loglarda belirtelim.
+            endpoint = "GoogleTranslateV2"
+            if progress_callback: progress_callback("ℹ️ Yerel AI şimdilik 'Tam Çeviri' modunda çalışır. Loader için Google aktif edildi.")
 
         at_content = f"""[Service]
 Endpoint={endpoint}
@@ -987,7 +1211,7 @@ FallbackEndpoint=
 
 [General]
 Language={target_lang}
-FromLanguage=en
+FromLanguage={source_lang}
 
 [Behaviour]
 MaxTranslationsBeforeShutdown=4000
@@ -996,6 +1220,8 @@ MaxSecondsInQueue=5
 Delay=0
 ForceUIResizing=True
 WhitespaceRemovalStrategy=TrimPerlineInToken
+RegexPostProcessing=r:MEK\b=;r:MAK\b=;r:mek\b=;r:mak\b=
+ReloadTranslationsOnFileChange=True
 
 [TextFrameworks]
 EnableUGUI=True
@@ -1004,8 +1230,13 @@ EnableNGUI=True
 EnableTextMesh=True
 {extra_section}
 """
-        with open(at_cfg, 'w', encoding='utf-8') as f:
-            f.write(at_content)
+        # Tüm bulunan config dosyalarına yaz
+        for cfg_path in at_configs:
+            # Sadece dosya varsa veya üst klasörü varsa yaz
+            if cfg_path.parent.exists():
+                with open(cfg_path, 'w', encoding='utf-8') as f:
+                    f.write(at_content)
+                if progress_callback: progress_callback(f"⚙️ Yapılandırma yazıldı: {cfg_path.name}")
             
         if progress_callback: progress_callback(f"🌍 Çeviri dili yapılandırıldı: {target_lang}")
 
@@ -1119,15 +1350,9 @@ EnableTextMesh=True
         return deleted_count
 
     @staticmethod
-    def uninstall(game_exe_path):
-        """Oyun klasöründeki modları temizler (GUI için wrapper)"""
-        count = TranslatorManager.cleanup_game_dir(game_exe_path)
-        if count > 0:
-            return True, f"{count} dosya/klasör temizlendi."
-        else:
-            return True, "Temizlenecek dosya bulunamadı."
+    def fix_translations_with_ai(game_path, api_key, progress_callback=None, manual_file_path=None, service="gemini"):
         """
-        AutoGeneratedTranslations.txt dosyasındaki çevirileri Gemini ile düzeltir.
+        AutoGeneratedTranslations.txt dosyasındaki çevirileri AI (Gemini veya Yerel AI) ile düzeltir.
         Sadece '-mek/-mak' ile bitenleri seçip düzeltmek üzere gönderir.
         Paralel (Worker) desteği ile hızlandırılmıştır.
         """
@@ -1214,9 +1439,20 @@ EnableTextMesh=True
             
         if progress_callback: progress_callback(f"🔍 Düzeltilecek: {total_fix_needed} satır.")
 
+        # Yerel AI Seçiliyse Llama'yı hazırla
+        local_ai_translator = None
+        if service == "local_ai":
+            try:
+                from gemma.local_ai_engine import LocalAIEngine
+                local_ai_translator = LocalAIEngine()
+                succ, msg = local_ai_translator.load_model()
+                if progress_callback: progress_callback(f"🤖 {msg}")
+                if not succ: local_ai_translator = None
+            except: local_ai_translator = None
+
         # 3. Paralel (Worker) İşleme
-        batch_size = 25 
-        max_workers = 8 # 8 İşçi
+        batch_size = 25 if service == "gemini" else 1 # AI için tek tek işlemek daha stabil
+        max_workers = 8 if service == "gemini" else 1 
         
         batches = []
         for i in range(0, total_fix_needed, batch_size):
@@ -1245,6 +1481,18 @@ EnableTextMesh=True
                 local_map[idx_in_batch] = line_idx
                 prompt_text += f"{idx_in_batch}: {val}\\n"
                 
+            # [YENİ] YEREL AI (LOCAL) DESTEĞİ
+            if local_ai_translator:
+                result_fixes = []
+                for idx_in_batch, (line_idx, val) in enumerate(batch_data):
+                    # Yerel AI'ya özel prompt (LocalAIEngine.translate zaten prompt hazırlıyor)
+                    corrected = local_ai_translator.translate(val, target_lang="Turkish")
+                    # Basit filtreleme (mek/mak hala varsa zorla kes)
+                    if corrected.lower().endswith(("mek", "mak")) and len(corrected) > 5:
+                         corrected = corrected[:-3]
+                    result_fixes.append((line_idx, corrected))
+                return result_fixes
+
             # API Çağrısı
             models_to_try = [
                 "gemini-1.5-flash", 
@@ -1283,6 +1531,11 @@ EnableTextMesh=True
             if not response:
                  return []
             
+            if response.status_code == 400:
+                return "ERROR_API_KEY"
+            if response.status_code == 429:
+                return "ERROR_QUOTA"
+            
             if response.status_code == 200:
                 result = response.json()
                 try:
@@ -1291,12 +1544,12 @@ EnableTextMesh=True
                 
                 # Cevabı Parse Et
                 result_fixes = []
-                for ans_line in answer.split('\\n'):
+                for ans_line in answer.split('\n'):
                     ans_line = ans_line.strip()
                     if not ans_line: continue
                     
                     # Regex ile ID ve Text'i ayır (Daha güvenli)
-                    match = re.search(r'^\\**(\\d+)\\**\\s*[:.]\\s*(.+)$', ans_line)
+                    match = re.search(r'^\**(\d+)\**\s*[:.]\s*(.+)$', ans_line)
                     if match:
                         try:
                             b_id = int(match.group(1))
@@ -1322,13 +1575,20 @@ EnableTextMesh=True
                 batch_res = future.result()
                 processed_batches += 1
                 
-                if batch_res:
+                if batch_res == "ERROR_API_KEY":
+                    if progress_callback: progress_callback("❌ HATA: Geçersiz Gemini API Anahtarı! Lütfen Ayarlar sayfasından anahtarınızı kontrol edin.")
+                    return False
+                elif batch_res == "ERROR_QUOTA":
+                    if progress_callback: progress_callback("⚠️ UYARI: Gemini kullanım kotası doldu. İşlem durduruluyor.")
+                    return False
+
+                if batch_res and isinstance(batch_res, list):
                     for line_idx, corrected_text in batch_res:
                         # Satırı güncelle
                         original_line = lines[line_idx]
                         if '=' in original_line:
                             key_part = original_line.split('=', 1)[0]
-                            lines[line_idx] = f"{key_part}={corrected_text}\\n"
+                            lines[line_idx] = f"{key_part}={corrected_text}\n"
                             correction_count += 1
                 
                 # İlerleme
@@ -1483,101 +1743,184 @@ EnableTextMesh=True
         return True
 
     @staticmethod
-    def apply_local_filter(game_path, progress_callback=None, manual_file_path=None, fix_grammar=True, fix_chars=False, loader_type="bepinex", target_lang="tr"):
+    def apply_local_filter(game_path, progress_callback=None, manual_file_path=None, fix_grammar=True, fix_chars=False, loader_type="bepinex", target_lang="tr", source_lang="en"):
         """
         Unity oyunları için _RegexSubstitutions.xml dosyasını oluşturur/günceller.
         Args:
             loader_type: "melon" ise AutoTranslator klasörüne bakar.
         """
         try:
-            # 1. Hedef Klasörü Bul
-            targets = []
+            # 1. Klasör Tespiti ve ZORLA OLUŞTURMA (Pre-emptive Creation)
+            target_dirs = []
             
-            # [FIX] MelonLoader Priority -> TEST TOOL MATCHING
-            # Test Tool "Translation" klasörünü Gamedir root'a atıyor.
-            # Biz de öyle yapmalıyız.
-            if loader_type == "melon":
-                targets.append(Path(game_path) / "Translation")
-                # Backup locations
-                targets.append(Path(game_path) / "AutoTranslator" / "Translation")
-            else:
-                # BepInEx Defaults
-                targets.append(Path(game_path) / "BepInEx" / "Translation")
-                targets.append(Path(game_path) / "BepInEx" / "plugins" / "XUnity.AutoTranslator" / "Translation")
-                targets.append(Path(game_path) / "Translation")
+            game_root = Path(game_path)
+            if game_root.is_file(): game_root = game_root.parent
             
-            target_dir = None
-            for t in targets:
-                if t.exists():
-                    target_dir = t
+            if progress_callback: progress_callback(f"🔍 Tarama Başladı: {game_root}")
+            
+            # Loader tipine göre muhtemel ana Translation merkezlerini belirle
+            possible_roots = []
+            if loader_type == "bepinex":
+                possible_roots.append(game_root / "BepInEx" / "Translation")
+            elif loader_type == "melon":
+                possible_roots.append(game_root / "AutoTranslator" / "Translation")
+                possible_roots.append(game_root / "UserData" / "AutoTranslator" / "Translation")
+            
+            # Standalone ve diğer ihtimaller
+            possible_roots.append(game_root / "AutoTranslator" / "Translation")
+            possible_roots.append(game_root / "Translation")
+
+            # Belirlenen tüm kök dizinleri zorla oluştur ve hedef listesine ekle
+            for p_root in possible_roots:
+                try:
+                    # tr/Text yapısını henüz oyun açılmadan biz kuruyoruz
+                    target_p = p_root / target_lang / "Text"
+                    if progress_callback: progress_callback(f"🛠️ Klasör Hazırlanıyor: {target_p.relative_to(game_root) if game_root in target_p.parents else target_p}")
+                    
+                    target_p.mkdir(parents=True, exist_ok=True)
+                    if target_p not in target_dirs:
+                        target_dirs.append(target_p)
+                except Exception as e:
+                    if progress_callback: progress_callback(f"⚠️ Klasör Oluşturulamadı: {e}")
+
+            # rglob ile mevcutları da tara (Eğer varsa)
+            try:
+                for trans_root in game_root.rglob("Translation"):
+                    if trans_root.is_dir():
+                        target_p = trans_root / target_lang / "Text"
+                        try:
+                            target_p.mkdir(parents=True, exist_ok=True)
+                            if target_p not in target_dirs:
+                                target_dirs.append(target_p)
+                        except: pass
+            except: pass
+
+            # Kullanıcının Kesin Mek-Mak Düzeltme Listesi
+            subs_content = (
+                # Manuel Eşleşmeler (Kullanıcı Listesi)
+                "Devam etmek=Devam Et\n"
+                "Devam Etmek=Devam Et\n"
+                "DEVAM ETMEK=Devam Et\n"
+                "devam etmek=Devam Et\n"
+                "Çıkış yapmak=Çıkış Yap\n"
+                "Çıkış Yapmak=Çıkış Yap\n"
+                "ÇIKIŞ YAPMAK=Çıkış Yap\n"
+                "çıkış yapmak=Çıkış Yap\n"
+                "Gitmek=Git\n"
+                "GITMEK=Git\n"
+                "gitmek=Git\n"
+                "Yüklemek=Yükle\n"
+                "yüklemek=Yükle\n"
+                "YÜKLEMEK=Yükle\n"
+                "Kaydetmek=Kaydet\n"
+                "kaydetmek=Kaydet\n"
+                "KAYDETMEK=Kaydet\n"
+                "Silmek=Sil\n"
+                "silmek=Sil\n"
+                "SILMEK=Sil\n"
+                "Başlamak=Başla\n"
+                "başlamak=Başla\n"
+                "BAŞLAMAK=Başla\n"
+                "Dönmek=Dön\n"
+                "dönmek=Dön\n"
+                "DÖNMEK=Dön\n"
+                "İptal etmek=İptal Et\n"
+                "İptal Etmek=İptal Et\n"
+                "IPTAL ETMEK=İptal Et\n"
+                "iptal etmek=İptal Et\n"
+                "Onaylamak=Onayla\n"
+                "onaylamak=Onayla\n"
+                "ONAYLAMAK=Onayla\n"
+                "Uygulamak=Uygula\n"
+                "uygulamak=Uygula\n"
+                "UYGULAMAK=Uygula\n"
+                "Kapatmak=Kapat\n"
+                "kapatmak=Kapat\n"
+                "KAPATMAK=Kapat\n"
+                "Açmak=Aç\n"
+                "açmak=Aç\n"
+                "AÇMAK=Aç\n"
+                # Regex Destekli Genel Kurallar (Garanti olsun diye)
+                "r:MEK\\b=\n"
+                "r:MAK\\b=\n"
+                "r:mek\\b=\n"
+                "r:mak\\b=\n"
+                "Ekmek=Ekmek\n"
+                "Yemek=Yemek\n"
+                "Kaymak=Kaymak\n"
+                "Çakmak=Çakmak\n"
+            )
+
+            # Bulunan TÜM hedef klasörlere yaz (Garantiye alıyoruz)
+            for t_dir in target_dirs:
+                if progress_callback: progress_callback(f"📂 Filtre ve Font Hazırlanıyor: {t_dir}")
+                
+                for f_name in ["_Substitutions.txt", "_Replacements.txt", "_Postprocessors.txt"]:
+                    f_path = t_dir / f_name
+                    with open(f_path, 'w', encoding='utf-8') as f:
+                        f.write(subs_content)
+                
+                # Hafıza Temizliği
+                cache_file = t_dir / "_AutoGeneratedTranslations.txt"
+                if cache_file.exists():
+                    try: cache_file.unlink()
+                    except: pass
+
+            # 4. Config Güncelle (Font Ayarları)
+            config_path = None
+            config_paths = [
+                game_root / "AutoTranslator" / "Config.ini",
+                game_root / "BepInEx" / "config" / "AutoTranslatorConfig.ini",
+                game_root / "UserData" / "AutoTranslatorConfig.ini"
+            ]
+            
+            for p in config_paths:
+                if p.exists():
+                    config_path = p
                     break
             
-            if not target_dir:
-                if loader_type == "melon":
-                     target_dir = Path(game_path) / "Translation"
-                else:
-                     target_dir = Path(game_path) / "Translation" # Default fall back
-                     
-                target_dir.mkdir(parents=True, exist_ok=True)
+            if config_path:
+                if progress_callback: progress_callback(f"⚙️ Config Font Ayarları Yapılıyor: {config_path.name}")
+                # Türkçe karakterler için en geniş kapsamlı font ayarları
+                TranslatorManager.update_config(game_root, "Behaviour", "OverrideFont", "Arial")
+                TranslatorManager.update_config(game_root, "Behaviour", "OverrideFontTextMeshPro", "Arial SDF")
+                TranslatorManager.update_config(game_root, "Behaviour", "FallbackFontTextMeshPro", "LiberationSans SDF")
+                TranslatorManager.update_config(game_root, "Behaviour", "EnableTextMeshPro", "True")
+                TranslatorManager.update_config(game_root, "Behaviour", "EnableText", "True")
+                # Gereksiz kısıtlamaları kaldır
+                TranslatorManager.update_config(game_root, "Behaviour", "IgnoreTextMeshProDynamicText", "False")
+            if progress_callback: progress_callback("🔥 MEK-MAK KATİLİ: Filtreler hazır, hafıza sıfırlandı!")
 
-            # [FIX] Kullanıcının ÇALIŞAN dediği "Test Tool" formatını uygulayalım.
-            # Test Tool: _Substitutions.txt oluşturuyor ve "mak$"="" formatını kullanıyor.
-            
-            # _RegexSubstitutions.xml yerine _Substitutions.txt kullanacağız.
-            txt_path = target_dir / target_lang / "Text" / "_Substitutions.txt"
-            txt_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            if progress_callback: progress_callback(f"📂 Hedef: {txt_path}")
-            
-            # İçerik (Test Tool Aynısı)
-            subs_content = '"mak$"=""\n"mek$"=""\n"mak\\b"=""\n"mek\\b"=""'
-            
-            # Eğer fix_grammar False ise boş yazabiliriz ama dosya oluşmalı
-            if not fix_grammar:
-                subs_content = ""
-
-            with open(txt_path, 'w', encoding='utf-8') as f:
-                f.write(subs_content)
-                
-            if progress_callback: progress_callback("✅ Mek-Mak Filtresi (TXT) uygulandı.")
-
-            # 4. Config Güncelle
+            # 4. Config Güncelle (Ana klasördeki Config'i de bul)
             config_path = None
-            if loader_type == "melon":
-                 # Test tool uses UserData/AutoTranslatorConfig.ini
-                 config_path = Path(game_path) / "UserData" / "AutoTranslatorConfig.ini"
-                 if not config_path.exists():
-                     config_path = Path(game_path) / "AutoTranslator" / "Config.ini"
-            else:
-                 config_path = Path(game_path) / "BepInEx" / "config" / "AutoTranslatorConfig.ini"
             
-            if not config_path or not config_path.exists():
-                 candidates = list(Path(game_path).rglob("AutoTranslatorConfig.ini"))
-                 if candidates: config_path = candidates[0]
-                 # Melon için Config.ini de olabilir
-                 if not config_path:
-                     candidates = list(Path(game_path).rglob("Config.ini"))
-                     if candidates: config_path = candidates[0]
+            # Standart yollar
+            config_paths = [
+                Path(game_path) / "AutoTranslator" / "Config.ini",
+                Path(game_path) / "BepInEx" / "config" / "AutoTranslatorConfig.ini",
+                Path(game_path) / "UserData" / "AutoTranslatorConfig.ini"
+            ]
+            
+            for p in config_paths:
+                if p.exists():
+                    config_path = p
+                    break
+            
+            # Derinlemesine ara
+            if not config_path:
+                try:
+                    candidates = list(Path(game_path).rglob("*Config.ini"))
+                    if candidates:
+                        config_path = candidates[0]
+                except: pass
             
             if config_path and config_path.exists():
-                lines = []
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    lines = f.readlines()
-                
-                new_lines = []
-                for line in lines:
-                    if line.strip().startswith("SubstitutionFile="):
-                        # Config yoluna göre RELATIVE path vermemiz gerekebilir mi?
-                        # Genellikle sadece dosya adı yeterli eğer aynı klasördeyse.
-                        # Ama Translation/tr/Text altında..
-                        # XUnity default: Translation\{Lang}\Text\_Substitutions.txt
-                        # Default değer zaten bu olabilir. Biz sadece dosyanın orada olduğundan emin olduk.
-                        new_lines.append(line) 
-                    else:
-                        new_lines.append(line)
-                        
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    f.writelines(new_lines)
+                # RegexPostProcessing'i Config'e doğrudan işle (En garantisi budur)
+                TranslatorManager.update_config(game_path, "Behaviour", "RegexPostProcessing", "r:MEK\\b=;r:MAK\\b=;r:mek\\b=;r:mak\\b=")
+                TranslatorManager.update_config(game_path, "Behaviour", "ReloadTranslationsOnFileChange", "True")
+                if progress_callback: progress_callback("⚙️ Config.ini içindeki Global Filtreler aktif edildi.")
+            
+            return True
 
             return True
         
@@ -1807,15 +2150,17 @@ EnableTextMesh=True
 
         # 2. Registry Anahtarını Sil (reg delete ile)
         try:
-            cmd = f'reg delete "HKCU\\{target_key_path}" /f'
-            
+            # shell=True KULLANMA: company/product oyun dosyasından geliyor,
+            # kabuk üzerinden çalıştırmak komut enjeksiyonuna açık olur.
+            cmd = ["reg", "delete", f"HKCU\\{target_key_path}", "/f"]
+
             # CREATE_NO_WINDOW
             CREATE_NO_WINDOW = 0x08000000
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = subprocess.SW_HIDE
-            
-            result = subprocess.run(cmd, startupinfo=si, capture_output=True, text=True, shell=True, creationflags=CREATE_NO_WINDOW)
+
+            result = subprocess.run(cmd, startupinfo=si, capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
             
             if result.returncode == 0:
                 if progress_callback: progress_callback("✅ Kayıt defteri ayarları başarıyla silindi.")
@@ -1996,4 +2341,87 @@ EnableTextMesh=True
         except Exception as e:
             if progress_callback: progress_callback(f"İndirme hatası: {e}")
             print(f"Download Error: {e}")
+            return None
+
+    @staticmethod
+    def fetch_latest_bepinex_builds(progress_callback=None):
+        """builds.bepinex.dev üzerinden en güncel Bleeding Edge BepInEx paket linklerini alır."""
+        import urllib.request
+        import urllib.error
+        import re
+        import ssl
+        
+        url = "https://builds.bepinex.dev/projects/bepinex_be"
+        results = {}
+        
+        try:
+            if progress_callback: progress_callback("BepInEx derlemeleri kontrol ediliyor...")
+            
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, context=ctx, timeout=3.0) as response:
+                html = response.read().decode('utf-8')
+                
+                # BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.755+3fab71a.zip formatını bul (URL içinde + yerine %2B olabilir)
+                links = re.findall(r'href="(.*?/BepInEx-Unity\.(IL2CPP|Mono)-win-(x64|x86)-[\d\.]+-be\.(\d+)(?:\+|%2B)[^\"]*\.zip)"', html, re.IGNORECASE)
+                
+                # Yukarıdan çekilenler sayfadaki sıralamaya göre gelecektir (en yeni en üstte)
+                for match in links:
+                    full_link = match[0]
+                    if full_link.startswith("/"):
+                        full_link = "https://builds.bepinex.dev" + full_link
+                        
+                    backend = match[1].lower()   # il2cpp veya mono
+                    arch = match[2].lower()      # x64 veya x86
+                    build_num = match[3]         # 755 vb.
+                    
+                    key = f"{backend}_{arch}"
+                    if key not in results:
+                        results[key] = []
+                        
+                    if len(results[key]) < 8: # Her türden en yeni 8 versiyonu listeye koy
+                        results[key].append({
+                            "url": full_link,
+                            "build": build_num,
+                            "display_name": f"☁️ BepInEx v6-be.{build_num} (İNDİR)"
+                        })
+                        
+            return results
+        except Exception as e:
+            if progress_callback: progress_callback(f"BepInEx listesi alınamadı: {e}")
+            return {}
+
+    @staticmethod
+    def download_bepinex_build(url, progress_callback=None):
+        """Belirtilen URL'den BepInEx paketini indirir ve cache'e kaydeder"""
+        import ssl
+        import urllib.request
+        import os
+        
+        target_name = url.split('/')[-1]
+        target_path = TranslatorManager.TOOLS_PATH / target_name
+        
+        if target_path.exists():
+            if progress_callback: progress_callback("Dosya önbellekten kullanılıyor.")
+            return str(target_path)
+            
+        try:
+            if progress_callback: progress_callback(f"İndiriliyor: {target_name}")
+            
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            with urllib.request.urlopen(req, context=ctx) as u, open(target_path, 'wb') as f:
+                f.write(u.read())
+                
+            return str(target_path)
+        except Exception as e:
+            if progress_callback: progress_callback(f"İndirme hatası: {e}")
+            if target_path.exists():
+                os.remove(target_path)
             return None

@@ -1,8 +1,14 @@
 """
 MEMOFAST - Konfigürasyon ve Yardımcı Fonksiyonlar
 """
+import os
 import sys
 from pathlib import Path
+
+# [KRİTİK] Veri Dizini Yapılandırması (%APPDATA%)
+# Bu dizin uygulama dosyalarından bağımsız, kullanıcıya özel veri alanıdır.
+USER_DATA_PATH = Path(os.getenv("APPDATA")) / "MemoFast"
+USER_DATA_PATH.mkdir(parents=True, exist_ok=True)
 
 
 class Constants:
@@ -18,7 +24,9 @@ class Constants:
     SUBPROCESS_TIMEOUT = 60  # Subprocess execution timeout
     
     # Thread/Worker
-    MAX_WORKERS = 50
+    # NOT: 50 eşzamanlı istek ücretsiz çeviri servislerinde hız sınırına (429)
+    # ve geçici IP banlarına yol açıyordu; 10 güvenli üst sınırdır.
+    MAX_WORKERS = 10
     MAX_RETRIES = 3
     
     # Scanner
@@ -70,14 +78,14 @@ class Constants:
 class Config:
     """Uygulama ayarları"""
     
-    # [YENİ] PyInstaller Uyumluluğu
     if getattr(sys, 'frozen', False):
         BASE_PATH = Path(sys.executable).parent
     else:
         BASE_PATH = Path(__file__).parent
 
     GAME_PATH = BASE_PATH / "game"
-    CACHE_PATH = BASE_PATH / ".cache"
+    CACHE_PATH = USER_DATA_PATH / ".cache"
+    USER_DATA_PATH = USER_DATA_PATH # GUI ve diğer modüller için referans
     
     # YouTube kanalı
     YOUTUBE_URL = "https://www.youtube.com/@MehmetariTv"
@@ -90,23 +98,39 @@ class Config:
         'manual': '📁'
     }
 
+    # Yerel AI Yapılandırması
+    AI_MODELS_PATH = BASE_PATH / "gemma" / "models"
+    DEFAULT_AI_MODEL = "Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+
     # Güncelleme URL (Google Drive JSON)
     UPDATE_URL = "https://drive.google.com/file/d/1gF4XEFQ0s-19myUsEYwWoz0iuVR7Jd0t/view?usp=sharing"
+
+    # [TOPLULUK] Çeviri havuzu (GitHub üzerinden, kullanıcıya şeffaf).
+    # index.json'a paket eklemek için: community_ceviriler/README.md'ye bakın.
+    COMMUNITY_CACHE_URL = "https://raw.githubusercontent.com/zibildak/MemoFastv/main/community_ceviriler/index.json"
+    # Kullanıcının "Topluluğa Gönder" dediğinde açılacak katkı sayfası:
+    COMMUNITY_CONTRIBUTE_URL = ("https://github.com/zibildak/MemoFastv/issues/new"
+                                "?title=%5B%C3%87eviri%20Paketi%5D%20Oyun%20Ad%C4%B1"
+                                "&body=Oyun%3A%20...%0AKaynak%20dil%3A%20en%0AHedef%20dil%3A%20tr%0A%0A"
+                                "Paket%20dosyas%C4%B1n%C4%B1%20buraya%20s%C3%BCr%C3%BCkleyin.")
     VERSION = "1.1.2" # Mevcut versiyonu burada tutalım
     THEME_COLOR = "#00aaff" # Varsayılan tema rengi
 
     @staticmethod
     def get_gemini_key():
-        """Settings.json'dan Gemini/DeepL API Key'i oku"""
+        """Settings.json'dan Gemini/DeepL API Key'i oku (şifreliyse çözer)"""
         try:
             import json
-            settings_file = Config.BASE_PATH / "settings.json"
+            settings_file = USER_DATA_PATH / "settings.json"
             if settings_file.exists():
                 with open(settings_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     # Hem deepl hem gemini key'lerine bak (legacy support)
-                    return data.get("deepl_api_key", "") or data.get("gemini_api_key", "")
-        except:
+                    raw_key = data.get("deepl_api_key", "") or data.get("gemini_api_key", "")
+                    if raw_key:
+                        from crypto_manager import decrypt_value
+                        return decrypt_value(raw_key)
+        except Exception:
             pass
         return ""
     

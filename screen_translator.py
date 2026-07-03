@@ -18,9 +18,7 @@ try:
 except ImportError:
     pass
 import re
-import asyncio
 import io
-import edge_tts
 
 # WinRT Windows OCR (Translumo Engine)
 try:
@@ -31,7 +29,6 @@ try:
     winrt_available = True
 except ImportError:
     winrt_available = False
-import pygame
 import tempfile
 import time
 import ctypes
@@ -193,13 +190,6 @@ class ScreenTranslatorOverlay(QWidget):
         self.init_signals_and_timers()
 
     def init_resources(self):
-        try:
-            pygame.mixer.pre_init(44100, -16, 2, 512)
-            pygame.mixer.init()
-        except: pass
-        
-        self.audio_lock = threading.Lock()
-        self.current_audio_file = None
         self.last_text = ""
         self.is_running = False
         self.loop_thread = None
@@ -351,8 +341,6 @@ class ScreenTranslatorOverlay(QWidget):
 
     def stop_loop(self):
         self.is_running = False
-        try: pygame.mixer.music.stop()
-        except: pass
 
     def translation_loop(self):
         while self.is_running:
@@ -455,9 +443,6 @@ class ScreenTranslatorOverlay(QWidget):
                 if self.result_window:
                     QMetaObject.invokeMethod(self.result_window.text_lbl, "setText", Qt.QueuedConnection, Q_ARG(str, translated))
             
-            if s.get("ocr_dubbing", False):
-                threading.Thread(target=self.speak_text, args=(translated, s.get("ocr_voice_gender", "Male")), daemon=True).start()
-                
             print(f"[TRANSLATE] Çeviri Sonucu: {translated}")
                 
         except Exception as e:
@@ -467,26 +452,6 @@ class ScreenTranslatorOverlay(QWidget):
             display_bbox = qt_bbox if qt_bbox else bbox
             if not is_auto:
                 QMetaObject.invokeMethod(self, "show_custom_popup", Qt.QueuedConnection, Q_ARG(str, f"Error: {e}"), Q_ARG(tuple, display_bbox))
-
-    def speak_text(self, text, gender):
-        with self.audio_lock:
-            voice = "tr-TR-EmelNeural" if gender.lower() == "female" else "tr-TR-AhmetNeural"
-            try:
-                if not pygame.mixer.get_init(): pygame.mixer.init()
-                pygame.mixer.music.unload()
-            except: pass
-            if self.current_audio_file and os.path.exists(self.current_audio_file):
-                try: os.remove(self.current_audio_file)
-                except: pass
-            tfile = os.path.join(tempfile.gettempdir(), f"mf_tts_{int(time.time())}.mp3")
-            async def _save(): await edge_tts.Communicate(text, voice).save(tfile)
-            try:
-                loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-                loop.run_until_complete(_save()); loop.close()
-                if os.path.exists(tfile):
-                    self.current_audio_file = tfile
-                    pygame.mixer.music.load(tfile); pygame.mixer.music.play()
-            except: pass
 
     @pyqtSlot(str, tuple)
     def show_custom_popup(self, text, bbox):
@@ -513,9 +478,28 @@ class ScreenTranslatorOverlay(QWidget):
 
     def load_settings(self):
         import json
-        p = os.path.join(os.path.dirname(__file__), "settings.json")
-        if os.path.exists(p):
-            with open(p, 'r', encoding='utf-8') as f: return json.load(f)
+        # Önce AppData (asıl konum), yoksa eski konum (script dizini)
+        appdata = os.getenv("APPDATA")
+        candidates = []
+        if appdata:
+            candidates.append(os.path.join(appdata, "MemoFast", "settings.json"))
+        candidates.append(os.path.join(os.path.dirname(__file__), "settings.json"))
+
+        for p in candidates:
+            if os.path.exists(p):
+                try:
+                    with open(p, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    try:
+                        from crypto_manager import decrypt_value, SENSITIVE_SETTINGS_KEYS
+                        for _key in SENSITIVE_SETTINGS_KEYS:
+                            if data.get(_key):
+                                data[_key] = decrypt_value(data[_key])
+                    except Exception:
+                        pass
+                    return data
+                except Exception:
+                    continue
         return {}
 
     def load_exceptions(self):

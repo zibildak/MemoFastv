@@ -135,3 +135,44 @@ class CryptoManager:
     def get_instance():
         """CryptoManager singleton'ını al"""
         return CryptoManager()
+
+
+# settings.json içinde şifreli tutulması gereken anahtarlar
+SENSITIVE_SETTINGS_KEYS = ("gemini_api_key", "deepl_api_key")
+
+
+def encrypt_value(value):
+    """
+    Tek bir değeri şifrele. Crypto kullanılamıyorsa değeri olduğu gibi döndürür
+    (uygulama çalışmaya devam etsin diye).
+    """
+    if not value or not isinstance(value, str):
+        return value
+    try:
+        crypto = CryptoManager()
+        if crypto.cipher is None:
+            return value
+        return crypto.encrypt(value)
+    except Exception as e:
+        logger.error(f"Değer şifrelenemedi, düz metin kaydedilecek: {e}")
+        return value
+
+
+def decrypt_value(value):
+    """
+    Şifreli değeri çöz. Değer şifreli değilse (eski sürümden kalan düz metin)
+    olduğu gibi döndürür — böylece eski settings.json dosyaları bozulmaz.
+    """
+    if not value or not isinstance(value, str):
+        return value
+    # Fernet token'ları her zaman "gAAAA" ile başlar; değilse legacy düz metindir
+    if not value.startswith("gAAAA"):
+        return value
+    try:
+        crypto = CryptoManager()
+        if crypto.cipher is None:
+            return value
+        return crypto.decrypt(value)
+    except Exception:
+        # Çözülemedi (farklı makinenin key'i vb.) → olduğu gibi dön
+        return value

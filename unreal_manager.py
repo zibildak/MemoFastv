@@ -30,23 +30,54 @@ except ImportError:
     tk = None
     simpledialog = None
 
+# Global cache for Local AI to avoid reloading 5GB model for each file
+_LOCAL_AI_INSTANCE = None
+
+def get_local_ai():
+    global _LOCAL_AI_INSTANCE
+    if _LOCAL_AI_INSTANCE is None:
+        try:
+            from gemma.local_ai_engine import LocalAIEngine
+            _LOCAL_AI_INSTANCE = LocalAIEngine()
+            success, msg = _LOCAL_AI_INSTANCE.load_model()
+            if not success:
+                logger.error(f"Local AI Model Yüklenemedi: {msg}")
+                return None
+        except Exception as e:
+            logger.error(f"Local AI Başlatma Hatası: {e}")
+            return None
+    return _LOCAL_AI_INSTANCE
+
 class GeminiTranslator:
     """Gemini API Wrapper for Translation"""
-    def __init__(self, api_key, target_lang="tr"):
+    def __init__(self, api_key, target_lang="tr", model="gemini-2.5-flash", source_lang="en"):
         self.api_key = api_key
         self.target_lang = target_lang
-        self.url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+        self.source_lang = source_lang
+        self.cache = {} # [YENİ] Önbellek
+        import threading
+        self._cache_lock = threading.Lock() # Paralel çeviri worker'ları için
+        
+        # 2026 Güncellemesi: Model ismini dinamik yapıyoruz
+        if not model.startswith("models/"):
+            model_path = f"models/{model}"
+        else:
+            model_path = model
+            
+        self.url = f"https://generativelanguage.googleapis.com/v1/{model_path}:generateContent?key={api_key}"
         self.headers = {'Content-Type': 'application/json'}
         
         # Dil Haritası
         self.lang_map = {
-            "tr": "Turkish", "ru": "Russian", "pt": "Brazilian Portuguese", 
-            "es": "Spanish", "id": "Indonesian", "pl": "Polish", 
-            "de": "German", "fr": "French", "it": "Italian", "en": "English"
+            "tr": "Turkish", "ru": "Russian", "pt": "Brazilian Portuguese",
+            "es": "Spanish", "id": "Indonesian", "pl": "Polish",
+            "de": "German", "fr": "French", "it": "Italian", "en": "English",
+            "ja": "Japanese", "zh": "Chinese", "ko": "Korean"
         }
         self.target_lang_name = self.lang_map.get(target_lang, "Turkish")
+        self.source_lang_name = self.lang_map.get(source_lang, "English")
 
-    def ask(self, prompt):
+    def ask(self, prompt, timeout=10):
         """Genel amaçlı Gemini sorgusu"""
         data = {
             "contents": [{
@@ -54,19 +85,178 @@ class GeminiTranslator:
             }]
         }
         try:
-            response = requests.post(self.url, headers=self.headers, json=data, timeout=10)
+            response = requests.post(self.url, headers=self.headers, json=data, timeout=timeout)
             if response.status_code == 200:
                 result = response.json()
                 return result['candidates'][0]['content']['parts'][0]['text'].strip()
+            
+            # Hata durumunu logla ve konsola bas
+            err_msg = f"❌ Gemini API Hatası ({response.status_code}): {response.text}"
+            print(err_msg)
+            logger.error(err_msg)
+            
+            # Özel hata durumları için metin dönebiliriz (isteğe bağlı)
+            if response.status_code == 400:
+                return "HATA: GEÇERSİZ_API_KEY (Lütfen Ayarları Kontrol Edin)"
+            elif response.status_code == 429:
+                return "HATA: KOTA_DOLDU (Limit Aşıldı)"
+                
             return None
-        except:
+        except Exception as e:
+            logger.error(f"Gemini İstek Hatası: {e}")
             return None
 
-    def translate(self, text):
+    def translate(self, text, target_lang=None):
+        # target_lang worker tarafından kwarg olarak geçilebilir; verilirse günceller.
+        # (Önceden bu parametre kabul edilmediği için her çağrı TypeError veriyordu
+        # ve Gemini ile locres çevirisi sessizce başarısız oluyordu.)
+        if target_lang and target_lang != self.target_lang:
+            self.target_lang = target_lang
+            self.target_lang_name = self.lang_map.get(target_lang, "Turkish")
         if not text or not text.strip(): return text
         
-        prompt = f"You are a professional video game translator. Translate the following text from English to {self.target_lang_name}. IMPORTANT: Translate imperative verbs as commands, NOT infinitives. Maintain the emotional tone and brevity. Do NOT provide any explanations. just the translation:\\n\\n{text}"
-        return self.ask(prompt)
+        # 1. Önbellek Kontrolü
+        with self._cache_lock:
+            if text in self.cache:
+                return self.cache[text]
+            
+        prompt = (
+            f"You are an expert video game localizer. Translate the following {self.source_lang_name} text to {self.target_lang_name}. "
+            f"CONTEXT: This is for a game UI (buttons, menus, or dialogues). "
+            f"RULE: Use natural, short game terminology. Always use IMPERATIVE forms for actions (e.g., 'Quit' -> 'Çıkış Yap', 'Save' -> 'Kaydet'). "
+            f"Never use infinitive forms (-mak/-mek) for commands. "
+            f"Placeholders like __VAR_0__ must be kept EXACTLY as-is. "
+            f"Output ONLY the translated text without any quotes or explanations.\\n\\nText: {text}"
+        )
+        
+        # [YENİ] İnatçı Deneme (Retry Logic)
+        for attempt in range(3):
+            translated = self.ask(prompt)
+            
+            # Hata yoksa veya başarıyla çevrildiyse
+            if translated and "HATA:" not in translated:
+                if self.target_lang == "tr":
+                    translated = apply_turkish_correction(translated)
+                with self._cache_lock:
+                    self.cache[text] = translated
+                return translated
+                
+            # Eğer hata KOTA (429) ise bekle ve tekrar dene
+            if translated == "HATA: KOTA_DOLDU (Limit Aşıldı)":
+                print(f"⏳ Kota doldu, {attempt+1}. deneme için 2sn bekleniyor... ({text[:20]})")
+                import time
+                time.sleep(2)
+                continue
+            
+            # Diğer hatalarda (400, 500 vb.) beklemeye gerek yok
+            break
+
+        return text # Her şey başarısız olursa orijinali dön
+
+    def translate_batch(self, texts, target_lang=None):
+        """
+        [TOPLU MOD] Birden fazla metni TEK API isteğiyle çevirir.
+        Satır başına istek yerine ~40 satırı tek pakette göndererek
+        hem hızı ~30 kat artırır hem de kota tüketimini düşürür.
+
+        Args:
+            texts: Çevrilecek metin listesi
+        Returns:
+            list: texts ile aynı uzunlukta; çevrilemeyen girdiler None olur
+                  (çağıran taraf bunlar için tekil çeviriye düşebilir).
+        """
+        if target_lang and target_lang != self.target_lang:
+            self.target_lang = target_lang
+            self.target_lang_name = self.lang_map.get(target_lang, "Turkish")
+
+        results = [None] * len(texts)
+        if not texts:
+            return results
+
+        # 1. Önbellekten doldur, kalanları belirle
+        pending = []
+        with self._cache_lock:
+            for i, t in enumerate(texts):
+                if not t or not t.strip():
+                    results[i] = t
+                elif t in self.cache:
+                    results[i] = self.cache[t]
+                else:
+                    pending.append(i)
+
+        if not pending:
+            return results
+
+        import json as _json
+        input_array = _json.dumps([texts[i] for i in pending], ensure_ascii=False)
+
+        prompt = (
+            f"You are an expert video game localizer. Translate each {self.source_lang_name} string "
+            f"in the JSON array below to {self.target_lang_name}. "
+            f"CONTEXT: Game UI texts (buttons, menus, dialogues). "
+            f"RULES: Use natural, short game terminology. Use IMPERATIVE forms for actions "
+            f"(e.g., 'Quit' -> 'Çıkış Yap'). Never use infinitive forms (-mak/-mek) for commands. "
+            f"Placeholders like __VAR_0__ must be kept EXACTLY as-is. "
+            f"OUTPUT FORMAT: Return ONLY a valid JSON array of strings with EXACTLY "
+            f"{len(pending)} elements, in the same order as the input. No markdown, no explanations.\n\n"
+            f"Input: {input_array}"
+        )
+
+        for attempt in range(3):
+            # Toplu istek tekil istekten uzun sürer, geniş timeout kullan
+            raw = self.ask(prompt, timeout=90)
+
+            if raw == "HATA: KOTA_DOLDU (Limit Aşıldı)":
+                import time
+                time.sleep(2)
+                continue
+            if not raw or raw.startswith("HATA:"):
+                break
+
+            parsed = self._parse_batch_response(raw, len(pending))
+            if parsed is None:
+                continue  # Format bozuk geldi, bir kez daha dene
+
+            for n, i in enumerate(pending):
+                tr = parsed[n]
+                if tr and isinstance(tr, str) and tr.strip():
+                    if self.target_lang == "tr":
+                        tr = apply_turkish_correction(tr)
+                    results[i] = tr
+                    with self._cache_lock:
+                        self.cache[texts[i]] = tr
+            return results
+
+        return results  # Başarısız — kalanlar None, caller tekil moda düşer
+
+    @staticmethod
+    def _parse_batch_response(raw, expected_count):
+        """Gemini yanıtından JSON dizisini güvenli şekilde ayıklar."""
+        import json as _json
+        import re as _re
+
+        text = raw.strip()
+        # Markdown kod bloğu sarmalını temizle: ```json ... ```
+        fence = _re.match(r'^```(?:json)?\s*(.*?)\s*```$', text, _re.DOTALL)
+        if fence:
+            text = fence.group(1).strip()
+
+        # Yanıtın içinden ilk JSON dizisini bul (başta/sonda açıklama olabilir)
+        if not text.startswith('['):
+            start = text.find('[')
+            end = text.rfind(']')
+            if start == -1 or end == -1 or end <= start:
+                return None
+            text = text[start:end + 1]
+
+        try:
+            data = _json.loads(text)
+        except Exception:
+            return None
+
+        if not isinstance(data, list) or len(data) != expected_count:
+            return None
+        return data
 
 # İstisnalar (Global)
 TURKISH_EXCEPTIONS = {
@@ -76,11 +266,7 @@ TURKISH_EXCEPTIONS = {
 
 def apply_turkish_correction(text):
     """
-    Çevirilerdeki gereksiz mastar eklerini kaldırır.
-    Run -> Koşmak (Koş)
-    Play -> Oynamak (Oyna)
-    Git -> Gitmek (Git)
-    Ancak 'Ekmek' gibi isimleri korur.
+    Çevirilerdeki gereksiz mastar eklerini kaldırır (Tüm kelimeleri tarar).
     """
     if not text: return text
     
@@ -88,30 +274,28 @@ def apply_turkish_correction(text):
         # 1. Kelimelere ayır
         words = text.split()
         if not words: return text
-            
-        last_word_raw = words[-1]
         
-        # 2. Regex ile kelimeyi parçala: (Kök)(mek/mak)(Noktalama)
-        match = re.search(r'^(.+?)(m[ae]k)(\W*)$', last_word_raw, re.IGNORECASE)
-        
-        if match:
-            root = match.group(1)   # Örn: Koş, Bin, Ek
-            suffix = match.group(2) # Örn: mak, mek
-            punct = match.group(3)  # Örn: ., !, ?
+        new_words = []
+        for word in words:
+            # Noktalama işaretini ayır
+            match = re.search(r'^(.+?)(m[ae]k)(\W*)$', word, re.IGNORECASE)
             
-            full_word = root + suffix
-            
-            # 3. İstisna Kontrolü
-            if full_word.lower() not in TURKISH_EXCEPTIONS:
-                # İstisna değilse eki kaldır
-                new_last_word = root + punct
-                words[-1] = new_last_word
-                return " ".join(words)
-        
-        return text
+            if match:
+                root = match.group(1)
+                suffix = match.group(2)
+                punct = match.group(3)
+                full_word = root + suffix
+                
+                if full_word.lower() not in TURKISH_EXCEPTIONS:
+                    new_words.append(root + punct)
+                else:
+                    new_words.append(word)
+            else:
+                new_words.append(word)
+                
+        return " ".join(new_words)
         
     except Exception as e:
-        print(f"Filter error details: {e}")
         return text
 
 class VariableProtector:
@@ -163,7 +347,7 @@ class VariableProtector:
                 
         return text
 
-def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, service="google", api_key="", max_workers=10, progress_max_callback=None, progress_bar_callback=None, manual_review_callback=None, target_lang="tr"):
+def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, service="google", api_key="", max_workers=10, progress_max_callback=None, progress_bar_callback=None, manual_review_callback=None, target_lang="tr", source_lang="en"):
     """Global Locres Translator Function"""
     tool_path = Config.BASE_PATH / "files" / "tools" / "UnrealLocres.exe"
     
@@ -232,8 +416,20 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
         except Exception as e:
             print(f"Resume load error: {e}")
 
+    # [YENİ] Kalıcı Global Çeviri Önbelleği — bir kez çevrilen metin diske yazılır,
+    # başka oyunlarda/oturumlarda tekrar API'ye gitmez (ücretsiz kullanım hedefi).
+    persist_cache = None
+    cache_hit_count = 0
+    try:
+        from translation_cache import TranslationCache
+        persist_cache = TranslationCache(target_lang=target_lang, source_lang=source_lang)
+        if len(persist_cache) > 0 and progress_callback:
+            progress_callback(f"💾 Kalıcı önbellek hazır: {len(persist_cache)} hazır çeviri mevcut.")
+    except Exception as e:
+        print(f"Kalıcı önbellek açılamadı (çeviri normal devam eder): {e}")
+
     translator = None
-    if service == "deepl" and api_key:
+    if service == "deepl" and api_key and DeepL:
         try:
             # DeepL init
             # [FIX] DeepL requires PT-BR or PT-PT, 'pt' is not allowed as target
@@ -242,19 +438,48 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
             elif target_lang.lower() == "en": use_lang = "EN-US"
             
             is_free = True if api_key.strip().endswith(":fx") else False
-            translator = DeepL(api_key=api_key, source='en', target=use_lang, use_free_api=is_free)
+            translator = DeepL(api_key=api_key, source=source_lang, target=use_lang, use_free_api=is_free)
             if progress_callback: progress_callback("🚀 DeepL API kullanılıyor...")
         except Exception as e:
             if progress_callback: progress_callback(f"⚠️ DeepL Hatası: {e}\nGoogle Translate'e dönülüyor...")
-            translator = GoogleTranslator(source='auto', target=target_lang)
+            translator = GoogleTranslator(source=source_lang, target=target_lang) if GoogleTranslator else None
     elif service == "gemini" and api_key:
         try:
-            translator = GeminiTranslator(api_key, target_lang=target_lang)
+            translator = GeminiTranslator(api_key, target_lang=target_lang, source_lang=source_lang)
             if progress_callback: progress_callback("✨ Gemini AI kullanılıyor...")
         except:
-            translator = GoogleTranslator(source='auto', target=target_lang)
+            translator = GoogleTranslator(source=source_lang, target=target_lang) if GoogleTranslator else None
+    elif service == "local_ai":
+        global _LOCAL_AI_INSTANCE
+        try:
+            from gemma.local_ai_engine import LocalAIEngine
+            
+            if _LOCAL_AI_INSTANCE is None:
+                if progress_callback: progress_callback("📦 Yerel AI motoru başlatılıyor...")
+                _LOCAL_AI_INSTANCE = LocalAIEngine()
+                if progress_callback: progress_callback("🧠 Model dosyası diskten RAM'e aktarılıyor... (5 GB veri okunuyor, lütfen bekleyin)")
+                success, msg = _LOCAL_AI_INSTANCE.load_model()
+                if not success:
+                    if progress_callback: progress_callback(f"⚠️ Hata: {msg}\nGoogle Translate'e geçiliyor...")
+                    translator = GoogleTranslator(source=source_lang, target=target_lang) if GoogleTranslator else None
+                    _LOCAL_AI_INSTANCE = None 
+                else:
+                    if progress_callback: progress_callback("✅ Model RAM'e başarıyla yüklendi!")
+                    translator = _LOCAL_AI_INSTANCE
+            else:
+                if progress_callback: progress_callback("⚡ Model zaten bellekte hazır! (Cache kullanılıyor)")
+                translator = _LOCAL_AI_INSTANCE
+                
+        except Exception as e:
+            if progress_callback: progress_callback(f"⚠️ Yerel AI Modül Hatası: {e}\nGoogle Translate'e dönülüyor...")
+            translator = GoogleTranslator(source=source_lang, target=target_lang) if GoogleTranslator else None
     else:
-        translator = GoogleTranslator(source='auto', target=target_lang) if GoogleTranslator else None
+        translator = GoogleTranslator(source=source_lang, target=target_lang) if GoogleTranslator else None
+
+    # [FIX] Yerel AI (LLM) için paralel çalışma performansı düşürür, tekil (1) çalıştırılmalı
+    if service == "local_ai":
+        max_workers = 1
+        if progress_callback: progress_callback("ℹ️ Yerel AI modu: Tek kanallı (Sequential) işlem modu aktif.")
 
     # Kütüphane yoksa Fallback (requests) kullanılacak, hata fırlatma.
     if not translator and progress_callback and not resume_dict: # Resume varsa çok dert değil
@@ -271,8 +496,8 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
         rows = list(reader)
         
     if progress_callback:
-        progress_callback(f"📊 CSV Okundu. Toplam Satır: {len(rows)}")
-        progress_callback(f"🔧 Çevirici Servis: {service} (API Key: {'Var' if api_key else 'Yok'})")
+        progress_callback(f"📊 CSV Okundu: {len(rows)} satır işleniyor.")
+        progress_callback(f"🔧 Servis: {service.upper()}")
 
     # 2. İŞLEME AŞAMASI (Paralel Çeviri - Turbo Mode v8)
     work_items = [] 
@@ -286,10 +511,10 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
             while len(row) < 3: row.append("")
         
         source_text = row[1]
-        
+
         if not source_text or len(source_text) < 2:
             continue
-            
+
         # [YENİ] Resume Kontrolü
         if source_text in resume_dict:
             rows[i][2] = resume_dict[source_text] # Target = TR
@@ -297,7 +522,16 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
             success_count += 1
             # Work items'a EKLEME
             continue
-            
+
+        # [YENİ] Kalıcı Global Önbellek Kontrolü (oyunlar arası, ücretsiz kullanım)
+        if persist_cache:
+            cached_tr = persist_cache.get(source_text)
+            if cached_tr:
+                rows[i][2] = cached_tr
+                success_count += 1
+                cache_hit_count += 1
+                continue
+
         work_items.append((i, source_text))
 
     def translate_worker(idx, text):
@@ -313,14 +547,23 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
             # Eğer hiç tag yoksa text ile aynıdır.
             
             if translator:
-                res_text = translator.translate(protected_text)
+                # [FIX] Polymorphic translate call
+                # Yerel AI ve Gemini 'target_lang' parametresini çalışma anında kabul eder.
+                # GoogleTranslator ve DeepL ise başlatılırken (init) dili alır.
+                
+                class_name = translator.__class__.__name__
+                if class_name in ["LocalAIEngine", "GeminiTranslator"]:
+                    res_text = translator.translate(protected_text, target_lang=target_lang)
+                else:
+                    res_text = translator.translate(protected_text)
             else:
                 try:
                     url = "https://translate.googleapis.com/translate_a/single"
-                    params = {"client": "gtx", "sl": "auto", "tl": target_lang, "dt": "t", "q": protected_text}
+                    params = {"client": "gtx", "sl": source_lang, "tl": target_lang, "dt": "t", "q": protected_text}
                     r = requests.get(url, params=params, timeout=5)
                     if r.status_code == 200: res_text = r.json()[0][0][0]
-                except: pass
+                except Exception as e_req:
+                    print(f"Fallback request error: {e_req}")
             
             if res_text:
                 # [YENİ] Değişken Geri Yükleme (Restore)
@@ -337,37 +580,127 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
                         res_text = apply_turkish_correction(res_text)
                 except: pass
             return idx, res_text
-        except: return idx, None
+        except Exception as e_worker:
+            print(f"Worker error at index {idx}: {e_worker}")
+            return idx, None
 
     # Thread Pool Başlat
     total_items = len(work_items)
+    use_gemini_batch = (
+        translator is not None
+        and translator.__class__.__name__ == "GeminiTranslator"
+        and total_items > 1
+    )
+
     if progress_callback:
-        progress_callback(f"🚀 TURBO MOD Devrede: {total_items} satır {max_workers} işçi ile çevriliyor...")
-    
+        if service == "local_ai":
+            progress_callback(f"🚀 Yerel AI ile Çeviri Başladı... (Sırayla İşleniyor - Toplam: {total_items})")
+        elif use_gemini_batch:
+            progress_callback(f"🚀 GEMİNİ TOPLU MOD: {total_items} satır paketler halinde çevriliyor (çok daha hızlı, daha az kota)...")
+        else:
+            progress_callback(f"🚀 TURBO MOD Devrede: {total_items} satır {max_workers} işçi ile çevriliyor...")
+
     if progress_max_callback:
         progress_max_callback(total_items)
 
     completed_count = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_idx = {executor.submit(translate_worker, idx, txt): idx for (idx, txt) in work_items}
-        for future in as_completed(future_to_idx):
-            idx = future_to_idx[future]
-            try:
-                result_idx, result_text = future.result()
-                if result_text:
-                    # rows[result_idx][1] = result_text # Source DEĞİŞTİRİLMİYOR
-                    if len(rows[result_idx]) > 2:
-                        rows[result_idx][2] = result_text # Target Dolduruluyor
-            except: pass
-            
-            completed_count += 1
-            if progress_bar_callback:
-                progress_bar_callback(completed_count)
-                
-            if completed_count % 20 == 0 or completed_count == total_items:
-                percent = int((completed_count / total_items) * 100)
-                if progress_callback:
-                    progress_callback(f"⚡ Çevriliyor (Turbo)... ({completed_count}/{total_items}) - %{percent}")
+
+    if use_gemini_batch:
+        # [TOPLU MOD] Satır başına istek yerine ~40 satırlık paketler tek istekte gider.
+        BATCH_SIZE = 40
+        chunks = [work_items[k:k + BATCH_SIZE] for k in range(0, len(work_items), BATCH_SIZE)]
+
+        def batch_worker(chunk):
+            protectors = {}
+            protected_texts = []
+            for idx, text in chunk:
+                p = VariableProtector()
+                protectors[idx] = p
+                protected_texts.append(p.protect(text))
+
+            batch_results = translator.translate_batch(protected_texts, target_lang=target_lang)
+
+            out = []
+            for (idx, text), res in zip(chunk, batch_results):
+                if not res:
+                    # Bu satır toplu yanıttan çıkmadı → tekil çeviriye düş
+                    try:
+                        res = translator.translate(protectors[idx].protect(text), target_lang=target_lang)
+                        if res == text:  # translate() başarısızlıkta orijinali döner
+                            res = None
+                    except Exception as e_single:
+                        print(f"Tekil fallback hatası (satır {idx}): {e_single}")
+                        res = None
+                if res:
+                    try:
+                        res = protectors[idx].restore(res)
+                    except Exception as e_res:
+                        print(f"Restore hatası (satır {idx}): {e_res}")
+                out.append((idx, res))
+            return out
+
+        # Aynı anda en fazla 3 paket: hem hızlı hem kota dostu
+        with ThreadPoolExecutor(max_workers=min(3, max_workers)) as executor:
+            batch_futures = [executor.submit(batch_worker, c) for c in chunks]
+            for future in as_completed(batch_futures):
+                try:
+                    for idx, result_text in future.result():
+                        if result_text and len(rows[idx]) > 2:
+                            rows[idx][2] = result_text
+                        completed_count += 1
+                        if progress_bar_callback:
+                            progress_bar_callback(completed_count)
+                except Exception as e_batch:
+                    print(f"Batch worker hatası: {e_batch}")
+
+                if progress_callback and total_items:
+                    percent = int((completed_count / total_items) * 100)
+                    progress_callback(f"⚡ [{completed_count}/{total_items}] - %{percent} tamamlandı (Toplu Mod)")
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {executor.submit(translate_worker, idx, txt): idx for (idx, txt) in work_items}
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    result_idx, result_text = future.result()
+                    if result_text:
+                        # rows[result_idx][1] = result_text # Source DEĞİŞTİRİLMİYOR
+                        if len(rows[result_idx]) > 2:
+                            rows[result_idx][2] = result_text # Target Dolduruluyor
+                except: pass
+
+                completed_count += 1
+                if progress_bar_callback:
+                    progress_bar_callback(completed_count)
+
+                # [FIX] Yerel AI yavaş olduğu için her satırda (veya daha sık) log verelim
+                update_freq = 20
+                if service == "local_ai": update_freq = 1
+
+                if completed_count % update_freq == 0 or completed_count == total_items:
+                    percent = int((completed_count / total_items) * 100)
+                    if progress_callback:
+                        msg = f"⚡ [{completed_count}/{total_items}] - %{percent} tamamlandı"
+                        if service == "local_ai" and 'result_text' in locals() and result_text:
+                            # Son çeviriyi de göster (kısa özet)
+                            short_txt = result_text[:50] + "..." if len(result_text) > 50 else result_text
+                            msg = f"🤖 [Satır {completed_count}/{total_items}] Çeviri: {short_txt}"
+                        progress_callback(msg)
+
+    # [YENİ] Yeni çevirileri kalıcı önbelleğe yaz (sonraki oyunlar için)
+    if persist_cache:
+        try:
+            for w_idx, w_src in work_items:
+                if len(rows[w_idx]) > 2 and rows[w_idx][2]:
+                    persist_cache.set(w_src, rows[w_idx][2])
+            persist_cache.save()
+            if progress_callback:
+                msg = f"💾 Kalıcı önbellek güncellendi (toplam {len(persist_cache)} çeviri birikti)."
+                if cache_hit_count:
+                    msg += f" Bu oyunda {cache_hit_count} satır önbellekten geldi — API'ye hiç gitmedi!"
+                progress_callback(msg)
+        except Exception as e:
+            print(f"Önbellek kayıt hatası (çeviri etkilenmez): {e}")
 
     # 3. YAZMA AŞAMASI (Dosyayı tekrar aç ve yaz)
     # [FIX] UTF-8 (BOM'suz) ve Newline sanitization
@@ -417,17 +750,6 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
 
     # [MANUEL REVIEW STEP]
     if manual_review_callback:
-        if progress_callback: 
-            progress_callback("⏸️ Manuel İnceleme Bekleniyor...")
-            progress_callback(f"📂 Çalışma Klasörü: {locres_file.parent}")
-            
-        # [KULLANICI İSTEĞİ] Klasörü otomatik aç
-        try:
-            folder_to_open = locres_file.parent
-            os.startfile(str(folder_to_open))
-        except Exception as e_open:
-            print(f"Folder open error: {e_open}")
-
         # [MODIFICATION CHECK] User dosyayı değiştirdi mi?
         # Öncesi mod time
         before_mtime = 0
@@ -547,19 +869,40 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
             except:
                 pass
 
-        new_locres = locres_file.with_suffix(".locres.new")
-        if new_locres.exists():
-            shutil.move(str(new_locres), str(locres_file))
-            if not is_pak_temp and progress_callback: 
-                progress_callback("✅ İşlem tamamlandı!")
-            return True
-        else:
-            # Fallback başarılı olduysa dosya zaten oluşturulmuş olabilir ama adı farklı olabilir?
-            # Kodda new_locres oluşturuluyor. Eğer UnrealLocres çalıştıysa o da .new oluşturur mu?
-            # UnrealLocres genelde direkt üzerine yazar veya .new oluşturur?
-            # Mevcut kod tool'un .new oluşturduğunu varsayıyor.
-            pass
-            return True
+        # --- DOSYA YERLEŞTİRME VE TEMİZLİK (RENAME & CLEANUP) ---
+        # UnrealLocres genelde .locres.new oluşturur, ancak bazı sürümler _TR.locres de yapabilir.
+        possible_results = [
+            locres_file.with_suffix(".locres.new"),
+            locres_file.with_name(locres_file.stem + "_TR.locres"),
+            locres_file.with_name(locres_file.name + ".new")
+        ]
+        
+        found_new = False
+        for pr in possible_results:
+            if pr.exists():
+                try:
+                    # Orijinali sil ve yenisini orijinal adıyla taşı
+                    if locres_file.exists(): locres_file.unlink()
+                    shutil.move(str(pr), str(locres_file))
+                    found_new = True
+                    if progress_callback: progress_callback(f"✅ Dosya başarıyla güncellendi: {locres_file.name}")
+                    break
+                except Exception as e_move:
+                    if progress_callback: progress_callback(f"⚠️ Dosya taşıma hatası: {e_move}")
+        
+        # Geçici CSV dosyalarını temizle (Paketleme öncesi kalabalık yapmasın)
+        try:
+            if csv_output and csv_output.exists(): csv_output.unlink()
+            if translated_csv and translated_csv.exists(): translated_csv.unlink()
+            if progress_callback: progress_callback("🧹 Geçici CSV dosyaları temizlendi.")
+        except: pass
+
+        if not found_new and not is_csv_input:
+             # Eğer hiç yeni dosya oluşmadıysa ve hata da almadıysak, belki tool direkt üzerine yazmıştır?
+             # Ya da bir hata vardır.
+             pass
+
+        return True
 
 
 class UnrealManager:
@@ -576,13 +919,59 @@ class UnrealManager:
         return locres_ready and repak_ready
 
     @staticmethod
-    def translate_game(game_exe_path, progress_callback=None, service="google", api_key="", max_workers=10, aes_key=None, game_name=None, ask_aes_key_callback=None, ask_file_callback=None, target_pak_path=None, target_internal_file_path=None, is_encrypted_override=None, progress_max_callback=None, progress_bar_callback=None, manual_review_callback=None, target_lang="tr"):
+    def translate_game(game_exe_path, progress_callback=None, service="google", api_key="", max_workers=10, aes_key=None, game_name=None, ask_aes_key_callback=None, ask_file_callback=None, target_pak_path=None, target_internal_file_path=None, is_encrypted_override=None, progress_max_callback=None, progress_bar_callback=None, manual_review_callback=None, target_lang="tr", backup_enabled=False, source_lang="en"):
         """Oyunun ana giriş noktası (GUI tarafından çağrılır)"""
         path_obj = Path(game_exe_path)
         
-        # [FIX] Doğrudan .locres dosyası seçildiyse PAK aramayı atla
-        if path_obj.suffix.lower() == ".locres":
-            if progress_callback: progress_callback(f"📂 Doğrudan Locres Dosyası İşleniyor: {path_obj.name}")
+        # --- SAFETY DEFAULTS ---
+        # "UnboundLocalError" ve eksik değişken hatalarını engellemek için:
+        tools_dir = Config.BASE_PATH / "files" / "tools"
+        detected_version = "V9"
+        detected_compression = "Zlib"
+        detected_mount = "../../../"
+        detected_seed = None
+        target_pak = None
+        unpack_dir = None
+        is_encrypted = False
+        # -----------------------
+
+        # Eğer hedef pak zaten seçilmişse tarama/arama adımlarını atla
+        if target_pak_path:
+            paks_dir = None
+            if isinstance(target_pak_path, list) and target_pak_path:
+                paks_dir = Path(target_pak_path[0]).parent
+            elif isinstance(target_pak_path, str) and target_pak_path:
+                paks_dir = Path(target_pak_path).parent
+            
+            if paks_dir and paks_dir.exists():
+                if progress_callback: 
+                    progress_callback(f"🎯 Hedef PAK Seçili. Tarama atlanarak doğrudan çeviriye geçiliyor.")
+                
+                result = PakManager.process_pak_translation(
+                    paks_dir, 
+                    progress_callback, 
+                    service, 
+                    api_key, 
+                    max_workers, 
+                    aes_key, 
+                    game_name,
+                    ask_aes_key_callback=ask_aes_key_callback,
+                    ask_file_callback=ask_file_callback,
+                    target_pak_path=target_pak_path,
+                    target_internal_file_path=target_internal_file_path,
+                    is_encrypted_override=is_encrypted_override,
+                    progress_max_callback=progress_max_callback,
+                    progress_bar_callback=progress_bar_callback,
+                    manual_review_callback=manual_review_callback,
+                    target_lang=target_lang,
+                    backup_enabled=backup_enabled,
+                    source_lang=source_lang
+                )
+                return result is not None
+
+        # [FIX] Doğrudan .locres veya .csv dosyası seçildiyse PAK aramayı atla
+        if path_obj.suffix.lower() in [".locres", ".csv"]:
+            if progress_callback: progress_callback(f"📂 Doğrudan Dil Dosyası İşleniyor: {path_obj.name}")
             # Global process_locres_file fonksiyonunu çağır
             try:
                 # process_locres_file global scope'da tanımlı olmalı
@@ -595,7 +984,8 @@ class UnrealManager:
                     progress_max_callback=progress_max_callback, 
                     progress_bar_callback=progress_bar_callback,
                     manual_review_callback=manual_review_callback,
-                    target_lang=target_lang
+                    target_lang=target_lang,
+                    source_lang=source_lang
                 )
             except Exception as e:
                 if progress_callback: progress_callback(f"❌ Locres İşleme Hatası: {e}")
@@ -693,15 +1083,17 @@ class UnrealManager:
             progress_max_callback=progress_max_callback,
             progress_bar_callback=progress_bar_callback,
             manual_review_callback=manual_review_callback,
-            target_lang=target_lang
+            target_lang=target_lang,
+            backup_enabled=backup_enabled,
+            source_lang=source_lang
         )
         
         return result is not None
 
     @staticmethod
-    def _translate_locres_file(locres_file, progress_callback=None, is_pak_temp=False, service="google", api_key="", progress_max_callback=None, progress_bar_callback=None):
+    def _translate_locres_file(locres_file, progress_callback=None, is_pak_temp=False, service="google", api_key="", progress_max_callback=None, progress_bar_callback=None, source_lang="en"):
         # Wrapper for backward compatibility if needed, calling global function
-        return process_locres_file(locres_file, progress_callback, is_pak_temp, service, api_key, progress_max_callback=progress_max_callback, progress_bar_callback=progress_bar_callback)
+        return process_locres_file(locres_file, progress_callback, is_pak_temp, service, api_key, progress_max_callback=progress_max_callback, progress_bar_callback=progress_bar_callback, source_lang=source_lang)
 
 
 class PakManager:
@@ -713,7 +1105,7 @@ class PakManager:
         return PakManager.TOOL_PATH.exists()
     
     @staticmethod
-    def process_game(game_file_path, progress_callback=None, service="google", api_key=None, max_workers=10, aes_key=None, game_name=None, ask_aes_key_callback=None, ask_file_callback=None, progress_max_callback=None, progress_bar_callback=None, target_pak_path=None, target_internal_file_path=None, is_encrypted_override=None, logger_callback=None, manual_review_callback=None, target_lang="tr"):
+    def process_game(game_file_path, progress_callback=None, service="google", api_key=None, max_workers=10, aes_key=None, game_name=None, ask_aes_key_callback=None, ask_file_callback=None, progress_max_callback=None, progress_bar_callback=None, target_pak_path=None, target_internal_file_path=None, is_encrypted_override=None, logger_callback=None, manual_review_callback=None, target_lang="tr", backup_enabled=False, source_lang="en"):
         """GUI ile Manager arasındaki köprü metod"""
         def unified_cb(msg):
             if progress_callback: progress_callback(msg)
@@ -735,7 +1127,9 @@ class PakManager:
             target_pak_path=target_pak_path,
             target_internal_file_path=target_internal_file_path,
             is_encrypted_override=is_encrypted_override,
-            target_lang=target_lang
+            target_lang=target_lang,
+            backup_enabled=backup_enabled,
+            source_lang=source_lang
         )
         return success, "İşlem başarıyla bitti" if success else "İşlem sırasında bir hata oluştu"
     
@@ -949,6 +1343,8 @@ class PakManager:
         except Exception as e:
             print(f"Gemini key ask error: {e}")
             return None
+            
+        return list(potential_keys) if potential_keys else None
 
     @staticmethod
     def ask_user_for_manual_key(game_name):
@@ -1129,13 +1525,16 @@ except Exception as e:
         return None
 
     @staticmethod
-    def process_pak_translation(paks_dir, progress_callback, service="google", service_api_key="", max_workers=10, aes_key=None, game_name=None, ask_aes_key_callback=None, ask_file_callback=None, target_pak_path=None, target_internal_file_path=None, is_encrypted_override=None, progress_max_callback=None, progress_bar_callback=None, manual_review_callback=None, target_lang="tr"):
+    def process_pak_translation(paks_dir, progress_callback, service="google", service_api_key="", max_workers=10, aes_key=None, game_name=None, ask_aes_key_callback=None, ask_file_callback=None, target_pak_path=None, target_internal_file_path=None, is_encrypted_override=None, progress_max_callback=None, progress_bar_callback=None, manual_review_callback=None, target_lang="tr", backup_enabled=False, source_lang="en"):
         """PAK dizinindeki ana paketi bul, aç, çevir ve paketle"""
         import tempfile
         import time
+        import shutil
         
-        if progress_callback: progress_callback("🔧 Unreal Manager v6 (Manual Oodle Guide)")
-        logger.debug("Unreal Manager v6 (Manual Oodle Guide)")
+        if progress_callback: progress_callback(f"🔧 Unreal Manager v6 (Manual Oodle Guide) - Gelen AES Key: {aes_key}")
+        logger.debug(f"Unreal Manager v6 (Manual Oodle Guide) - Gelen AES Key: {aes_key}")
+        
+        tools_dir = Config.BASE_PATH / "files" / "tools"
         
         # OODLE DLL OTOMATIK BULMA VE KOPYALAMA
         oodle_found = False
@@ -1155,33 +1554,86 @@ except Exception as e:
             except Exception as e:
                 print(f"Cleanup error: {e}")
         
-        # 1. Ana PAK dosyasını bul (Genelde en büyük olandır veya 'WindowsNoEditor')
-        # 1. Ana PAK dosyasını bul (Genelde en büyük olandır veya 'WindowsNoEditor')
-        # Recursive arama (rglob) ile alt klasörlerdeki pakları da bul
-        paks = list(paks_dir.rglob("*.pak"))
+        # 1. PAK Dosyalarını Belirle
+        paks_to_check = []
+        if target_pak_path:
+            if isinstance(target_pak_path, list):
+                paks_to_check = [Path(p) for p in target_pak_path if Path(p).exists()]
+                if progress_callback: progress_callback(f"📋 {len(paks_to_check)} adet puanlanmış PAK kontrol edilecek.")
+            else:
+                p_path = Path(target_pak_path)
+                if p_path.exists():
+                    paks_to_check = [p_path]
         
-        # _P.pak olanları ele (zaten patch ise)
-        paks = [p for p in paks if not p.name.endswith("_P.pak")]
-        
-        if not paks: 
+        # Eğer liste boşsa veya hiç verilmediyse rglob ile tara
+        if not paks_to_check:
+            paks = list(paks_dir.rglob("*.pak"))
+            # _P.pak olanları ele (zaten patch ise)
+            paks = [p for p in paks if not p.name.endswith("_P.pak")]
+            # Boyuta göre sırala (en büyük en baştadır)
+            paks.sort(key=lambda x: x.stat().st_size, reverse=True)
+            paks_to_check = paks
+
+        if not paks_to_check: 
              error_msg = f"İşlenecek .pak dosyası bulunamadı!\nAranan Konum: {paks_dir}"
              raise Exception(error_msg)
+
+        # 2. .locres İçeren Doğru PAK'ı Bul (Dinamik Tarama)
+        target_pak = None
         
-        # Boyuta göre sırala (en büyük en baştadır)
-        paks.sort(key=lambda x: x.stat().st_size, reverse=True)
-        target_pak = paks[0]
-        
-        # [FIX] Kullanıcı tarafından seçilen PAK varsa onu kullan (Explicit Selection)
-        if target_pak_path:
-            preferred_pak = Path(target_pak_path)
-            if preferred_pak.exists():
-                target_pak = preferred_pak
-                if progress_callback: 
-                    progress_callback(f"🎯 Hedef PAK (Manuel Seçim): {target_pak.name}")
-        
+        # Eğer kullanıcı özellikle bir iç dosya seçtiyse, o PAK'ı direkt kullan
+        if target_internal_file_path:
+             target_pak = paks_to_check[0] if paks_to_check else None
+             if progress_callback: progress_callback(f"🎯 Özel dosya seçildi, PAK sabitlendi: {target_pak.name}")
+        else:
+            if progress_callback: progress_callback("🔍 PAK'lar içinde dil dosyası aranıyor (Öncelik: .locres > /en/ > .csv)...")
+            
+            fallback_pak = None
+            for p_path in paks_to_check:
+                if progress_callback: progress_callback(f"📦 Test ediliyor: {p_path.name}")
+                
+                # repak list ile içeriğe bak
+                cmd_list = [str(PakManager.TOOL_PATH), "list", str(p_path)]
+                if aes_key:
+                    cmd_list.extend(["--aes-key", aes_key])
+                
+                try:
+                    res_list = subprocess.run(cmd_list, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+                    list_out = (res_list.stdout + res_list.stderr).lower()
+                    
+                    if res_list.returncode != 0:
+                        if "encrypted" in list_out or "key" in list_out:
+                            if progress_callback: progress_callback(f"🔒 {p_path.name} şifreli ve AES anahtarı yok, içeriği taranamadı.")
+                        else:
+                            if progress_callback: progress_callback(f"⚠️ {p_path.name} listelenirken hata oluştu (Kod: {res_list.returncode})")
+                        continue
+
+                    # 1. KESİN HEDEF (.locres)
+                    if ".locres" in list_out:
+                        target_pak = p_path
+                        if progress_callback: progress_callback(f"✅ Kesin sonuç bulundu! (.locres mevcut): {target_pak.name}")
+                        break
+                    
+                    # 2. GÜÇLÜ ADAYLAR (/en/ klasörü veya .csv)
+                    if not fallback_pak:
+                        if "/en/" in list_out or ".csv" in list_out:
+                            fallback_pak = p_path
+                            if progress_callback: progress_callback(f"📍 Aday PAK belirlendi (/en/ veya .csv): {fallback_pak.name}")
+                except Exception as e:
+                    if progress_callback: progress_callback(f"❌ Tarama hatası ({p_path.name}): {e}")
+
+            # Eğer .locres bulunamadıysa ama aday PAK varsa onu kullan
+            if not target_pak and fallback_pak:
+                target_pak = fallback_pak
+                if progress_callback: progress_callback(f"✨ .locres bulunamadı, en güçlü aday ile devam ediliyor: {target_pak.name}")
+            
+            # Eğer hiçbir şey bulunamadıysa ilkine (en yüksek puanlıya) dön
+            if not target_pak:
+                target_pak = paks_to_check[0]
+                if progress_callback: progress_callback(f"⚠️ Kritik dosya bulunamadı veya PAK'lar şifreli. Varsayılan (Puanı en yüksek) PAK ile devam ediliyor: {target_pak.name}")
+
         if progress_callback: 
-            progress_callback(f"📦 PAK Dosyası Analiz Ediliyor: {target_pak.name}")
-            progress_callback(f"📏 Boyut: {target_pak.stat().st_size / (1024*1024):.2f} MB")
+            progress_callback(f"📏 Seçilen PAK Boyutu: {target_pak.stat().st_size / (1024*1024):.2f} MB")
             
         # PAK Versiyonunu ve Mount Point'i öğren
         # PAK Versiyonunu ve Mount Point'i öğren
@@ -1201,8 +1653,16 @@ except Exception as e:
         
         # 2. Repak Info (Mount point için gerekli)
         cmd_info = [str(PakManager.TOOL_PATH), "info", str(target_pak)]
+        if aes_key:
+            clean_key = aes_key.replace("0x", "").replace("0X", "").strip()
+            cmd_info.extend(["--aes-key", clean_key])
+            
         res_info = subprocess.run(cmd_info, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
         
+        # [FIX] Değişkenleri hata durumuna karşı önceden tanımlıyoruz
+        detected_seed = None
+        detected_mount = "../../../" 
+
         if res_info.returncode == 0:
             import re
             m_match = re.search(r"mount point:\s*(.+)", res_info.stdout)
@@ -1213,8 +1673,6 @@ except Exception as e:
                 if v_match: detected_version = v_match.group(1)
             
             # [FIX] Path Hash Seed Detection (Robust Line-by-Line)
-            detected_seed = None
-            detected_mount = "../../../" 
             
             for line in res_info.stdout.splitlines():
                 line = line.strip()
@@ -1272,10 +1730,8 @@ except Exception as e:
             progress_callback("⏳ Dosya açılıyor (Unpack)...")
             
         start_time = time.time()
-
         temp_dir = tempfile.mkdtemp()
         try:
-
             temp_path = Path(temp_dir)
             
             # Repak Fix: PAK'ı kendi yanına kopyala (Unique Temp Name)
@@ -1483,7 +1939,6 @@ except Exception as e:
                         clean_err += "1. Google'da şu ifadeyi aratın: 'oo2core_9_win64.dll download'\n"
                         clean_err += "2. İndirdiğiniz dosyayı şu klasöre atın: \n"
                         clean_err += f"   {Config.BASE_PATH / 'files' / 'tools'}\n"
-                        clean_err += f"   {Config.BASE_PATH / 'files' / 'tools'}\n"
                         clean_err += "3. Tekrar başlatın."
                         try: temp_pak_path.unlink(missing_ok=True)
                         except: pass
@@ -1526,113 +1981,108 @@ except Exception as e:
                 else:
                     raise Exception("Verilen AES Key ile dosya açılamadı (Key yanlış olabilir).")
 
-            # LOCRES BULMA (Gelismis Secim)
-            all_locres = list(unpack_dir.rglob("*.locres"))
+            # LOCRES & CSV BULMA (Gelismis Secim)
+            all_locres = list(unpack_dir.rglob("*.locres")) + list(unpack_dir.rglob("*.csv"))
             
             # Debug: Ne çıktı?
             if not all_locres:
-                if progress_callback:
-                    progress_callback("📂 PAK içeriği listeleniyor (Locres bulunamadı):")
-                    found_any = False
-                    for i, f in enumerate(unpack_dir.rglob("*")):
-                        if i < 10: progress_callback(f"   - {f.name}")
-                        found_any = True
-                    if not found_any: progress_callback("   (Klasör Boş)")
-                    
-                raise Exception("PAK içinde dil dosyası (.locres) bulunamadı!")
+                if progress_callback: progress_callback("📂 PAK içeriği listeleniyor (Locres/CSV bulunamadı)...")
+                raise Exception("PAK içinde dil dosyası (.locres veya .csv) bulunamadı!")
                 
-            # --- TEKİL LOCRES ÇEVİRİSİ (DÖNGÜ FIX v2) ---
-            # NOT: "game.locres" filtresi kaldırıldı - tüm dilleri yakalıyordu ve döngüye neden oluyordu
-            english_locres_files = []
-            for f in all_locres:
-                path_str = str(f).replace("\\", "/").lower()
-                # SADECE İngilizce klasörlerini tespit et
-                if "/en/" in path_str or "/en-us/" in path_str or "/english/" in path_str:
-                    # Engine klasöründekileri atla
-                    if "/engine/" not in path_str:
-                        english_locres_files.append(f)
+            selected_files = []
             
-            if not english_locres_files and all_locres:
-                # Eğer hiç 'en' bulunamadıysa en büyük dosyayı seç (fallback)
-                all_locres.sort(key=lambda x: x.stat().st_size, reverse=True)
-                english_locres_files = [all_locres[0]]
+            # 1. KULLANICI GUI PANELINDEN BIR SEY SECTI MI (target_internal_file_path)
+            if target_internal_file_path:
+                if progress_callback: progress_callback(f"🖱️ Kullanıcı Özel Seçimi Algılandı...")
+                if isinstance(target_internal_file_path, list):
+                    selections = target_internal_file_path
+                else:
+                    selections = [s.strip() for s in target_internal_file_path.split(",")]
+                    
+                for sel in selections:
+                    for loc in all_locres:
+                        if sel.lower() in str(loc).lower():
+                            if loc not in selected_files:
+                                selected_files.append(loc)
+            
+            # 2. SECIM GELMEDIYSE ARAYUZE (GUI) SOR (ask_file_callback)
+            if not selected_files and ask_file_callback:
+                if progress_callback: progress_callback("🔄 Kullanıcının yan panelden seçimi dikkate alınıyor...")
+                choices = [str(p.relative_to(unpack_dir)) for p in all_locres]
+                try:
+                    user_chosen_paths = ask_file_callback(choices)
+                    if user_chosen_paths:
+                        if isinstance(user_chosen_paths, str): user_chosen_paths = [user_chosen_paths]
+                        for c in user_chosen_paths:
+                            for p in all_locres:
+                                if str(p.relative_to(unpack_dir)) == c:
+                                    selected_files.append(p)
+                except Exception as e:
+                    print(f"Callback err: {e}")
+            
+            # 3. YINE DE SECILMEDIYSE (TUM INGILIZCELERI AL)
+            if not selected_files:
+                if progress_callback: progress_callback("⚠️ Özel seçim yapılmadı, dosyalar otomatik taranıyor...")
+                for f in all_locres:
+                    path_str = str(f).replace("\\", "/").lower()
+                    if "/en/" in path_str or "/english/" in path_str or "/en-us/" in path_str:
+                        if "/engine/" not in path_str:
+                            selected_files.append(f)
+                            
+                # İngilizce adlı özel bir klasör yoksa hepsini veya en büyüğünü al
+                if not selected_files and all_locres:
+                     selected_files = all_locres
 
-            # Birden fazla bulunduysa sadece en büyüğünü seç (döngü önleme)
-            if len(english_locres_files) > 1:
-                english_locres_files.sort(key=lambda x: x.stat().st_size, reverse=True)
-                if progress_callback: 
-                    progress_callback(f"📂 {len(english_locres_files)} locres bulundu, en büyüğü seçildi: {english_locres_files[0].name}")
-                english_locres_files = [english_locres_files[0]]
+            if not selected_files:
+                raise Exception("İşlenecek locres veya csv dosyası seçilemedi/bulunamadı.")
 
-            target_locres = english_locres_files[0]
             if progress_callback: 
-                progress_callback(f"🌍 Çevrilecek dil dosyası: {target_locres.name}")
-                progress_callback(f"📝 Çevriliyor: {target_locres.name}")
+                progress_callback(f"📂 İşleme Alınacak Dil Dosyası Sayısı: {len(selected_files)}")
             
-            # Tek dosyayı çevir (döngü yok)
-            succ = process_locres_file(
-                target_locres, 
-                progress_callback, 
-                is_pak_temp=True, 
-                service=service, 
-                api_key=service_api_key, 
-                max_workers=max_workers, 
-                progress_max_callback=progress_max_callback, 
-                progress_bar_callback=progress_bar_callback, 
-                manual_review_callback=manual_review_callback, 
-                target_lang=target_lang
-            )
-            if not succ:
-                raise Exception(f"Dosya çevrilemedi: {target_locres.name}")
+            # --- SEÇİLEN TÜM DOSYALARI SIRAYLA ÇEVİR ---
+            for idx, target_locres in enumerate(selected_files):
+                if progress_callback: 
+                    progress_callback(f"📝 ({idx+1}/{len(selected_files)}) Çevriliyor: {target_locres.name} ({target_locres.parent.name})")
+                
+                succ = process_locres_file(
+                    target_locres, 
+                    progress_callback, 
+                    is_pak_temp=True, 
+                    service=service, 
+                    api_key=service_api_key, 
+                    max_workers=max_workers, 
+                    progress_max_callback=progress_max_callback, 
+                    progress_bar_callback=progress_bar_callback, 
+                    manual_review_callback=manual_review_callback, 
+                    target_lang=target_lang,
+                    source_lang=source_lang
+                )
+                if not succ:
+                    if progress_callback: progress_callback(f"⚠️ Dosya tam çevrilemedi: {target_locres.name}")
+                else:
+                    if progress_callback: progress_callback(f"✅ Başarılı: {target_locres.name}")
 
-            if progress_callback: progress_callback(f"✅ Dil dosyası başarıyla güncellendi: {target_locres.name}")
+            if progress_callback: progress_callback(f"✨ Tüm seçili dil dosyaları başarıyla güncellendi!")
 
-            # --- KRİTİK TEMİZLİK (GHOST & JUNK FILE REMOVAL) ---
-            if progress_callback: progress_callback("🧹 Gereksiz dosyalar ve kopyalar temizleniyor (V7)...")
-            
-            # 1. Tüm CSV, yedek ve geçici dosyaları temizle
-            for junk_ext in [".csv", ".new", ".bak", ".tr", ".tmp"]:
-                for junk_file in unpack_dir.rglob(f"*{junk_ext}"):
-                    try: junk_file.unlink()
-                    except: pass
-            
-            # 2. Her klasörde sadece tek bir .locres kalmasını garanti et (Duplicate önleme)
-            for folder in unpack_dir.rglob("*"):
-                if folder.is_dir():
-                    folder_name = folder.name.lower()
-                    # Sadece dil klasörlerinde (en, english vb.) bu temizliği yap
-                    if folder_name == "en" or folder_name == "english" or folder_name.startswith("en-"):
-                        l_files = list(folder.glob("*.locres"))
-                        if len(l_files) > 1:
-                            # Boyuta göre sırala (en büyük olan kalsın)
-                            l_files.sort(key=lambda x: x.stat().st_size, reverse=True)
-                            for extra in l_files[1:]:
-                                try: extra.unlink()
-                                except: pass
-                        
-                        # Locres dışındaki her şeyi (varsa) o klasörden temizle
-                        for item in folder.iterdir():
-                            if item.is_file() and item.suffix.lower() != ".locres":
-                                try: item.unlink()
-                                except: pass
+            # --- PAKETLEME ÖNCESİ TEMİZLİK (FINAL CLEANUP) ---
+            # Unpack klasöründe kalan tüm .csv ve gereksiz dosyaları sil.
+            # Sadece orijinal oyun dosyaları kalsın.
+            if progress_callback: progress_callback("🧹 Paketleme öncesi son temizlik yapılıyor...")
+            try:
+                for junk in unpack_dir.rglob("*"):
+                    if junk.is_file():
+                        if junk.suffix.lower() in [".csv", ".txt", ".log", ".bak", ".tmp"]:
+                            junk.unlink()
+                if progress_callback: progress_callback("✅ Gereksiz dosyalar (CSV, Log vb.) temizlendi.")
+            except Exception as e_clean:
+                print(f"Final cleanup error: {e_clean}")
 
-            if progress_callback: progress_callback("✨ Klasör yapısı sterilize edildi, sadece çevrilmiş dosyalar kaldı.")
-
-
-
-
-            
             # --- FONT INJECTION (TURKISH CHAR FIX) ---
             font_source = Config.BASE_PATH / "files" / "tools" / "fonts" / "Roboto-Regular.ttf"
             if font_source.exists():
                 if progress_callback: progress_callback("🔤 Türkçe Font Enjekte Ediliyor...")
                 
                 # Hedef: Engine/Content/Slate/Fonts/
-                # Note: unpack_dir is the root of the unpacked content.
-                # However, sometimes the mount point makes the structure different. 
-                # Usually standard structure inside pak is Engine/... or Game/...
-                
-                # Try to locate Engine folder or create it
                 font_target_dir = unpack_dir / "Engine" / "Content" / "Slate" / "Fonts"
                 
                 try:
@@ -1647,18 +2097,18 @@ except Exception as e:
                     print(f"Font inject error: {e_font}")
                     if progress_callback: progress_callback(f"⚠️ Font yüklenirken hata: {e_font}")
             
-            # --- OLD METHOD: FULL REPACK (DESTRUCTIVE) ---
-            # Kullanıcı isteği üzerine eski yönteme dönüldü (_P.pak yok, direkt yamala).
+            # --- TAM YAMA MODU (Full Repack) ---
+            if progress_callback: progress_callback("📦 Tam Paketleme Modu: Tüm dosyalar korunuyor...")
             
-            print("!!! TAM YAMA MODU (Full Repack) !!!")
             # --- OTOMATİK SIKIŞTIRMA TESPİTİ (COMPRESSION DETECTION) ---
             detected_compression = "Zlib" # Default
             if res_info.returncode == 0:
-                if "oodle" in res_info.stdout.lower():
+                stdout_lower = res_info.stdout.lower()
+                if "oodle" in stdout_lower:
                     detected_compression = "Oodle"
-                elif "zlib" in res_info.stdout.lower():
+                elif "zlib" in stdout_lower:
                     detected_compression = "Zlib"
-                elif "compressed: false" in res_info.stdout.lower():
+                elif "compressed: false" in stdout_lower:
                     detected_compression = "None"
 
             # Oodle kontrolü (DLL yoksa Zlib'e düş)
@@ -1670,26 +2120,10 @@ except Exception as e:
 
             if progress_callback: progress_callback(f"📦 Sıkıştırma Modu: {detected_compression}")
 
-            # --- PAKETLEME ÖNCESİ TAM STERİLİZASYON (PATCH HAZIRLIĞI) ---
-            # Patch (_P.pak) yama oluşturacağımız için oyunun diğer orijinal verilerini
-            # klasörden siliyoruz ki oluşturacağımız paket küçük ve sade olsun.
-            if progress_callback: progress_callback("🧪 Yama için klasör sterilize ediliyor (Sadece çeviriler kalacak)...")
-            for junk in list(unpack_dir.rglob("*")):
-                if junk.is_file():
-                    if junk.suffix.lower() not in [".locres", ".ttf"]:
-                        try: junk.unlink()
-                        except: pass
-            # Her klasörde sadece tek bir locres kalmasını bir kez daha garanti et
-            for folder in unpack_dir.rglob("*"):
-                if folder.is_dir():
-                    locres_files = list(folder.glob("*.locres"))
-                    if len(locres_files) > 1:
-                        locres_files.sort(key=lambda x: x.stat().st_size, reverse=True)
-                        for extra in locres_files[1:]:
-                            try: extra.unlink()
-                            except: pass
-
             # --- PAKETLEME (REPACK) ---
+            # [YENİ] Kullanıcı isteği: Nasıl çıkardıysa öyle paketlemeli, tüm dosyaları koru.
+            # Sterilizasyon bloğu (sadece locres bırakma) TAMAMEN kaldırıldı.
+            
             if progress_callback: progress_callback(f"📦 Oyun dosyaları paketleniyor ({detected_compression})...")
             
             pack_source_dir = unpack_dir
@@ -1717,37 +2151,38 @@ except Exception as e:
             except Exception as e:
                 raise e
 
-
-            # 4. DOSYA YERLEŞİMİ (PATCH PAK - _P.pak OLARAK YERLEŞTİRME)
-            if progress_callback: progress_callback(f"🚚 Yama dosyası (_P.pak) oyuna katarak atılıyor...")
+            # 4. DOSYA YERLEŞİMİ (ORİJİNAL ÜZERİNE YAZMA)
+            # [YENİ] Kullanıcı isteği: _P.pak patch yerine doğrudan orijinal üzerine (Yedek alındığını varsayıyoruz)
+            if progress_callback: progress_callback(f"🚚 Orijinal PAK dosyası güncelleniyor: {target_pak.name}")
             
-            # Patch Pakedinin adını belirle: OrijinalAd_P.pak
-            original_stem = target_pak.stem
-            # Eğer zaten _P varsa sonuna bir daha ekleme, değilse ekle
-            if not original_stem.endswith("_P"):
-                patch_name = f"{original_stem}_P.pak"
-            else:
-                patch_name = f"{original_stem}_Yama.pak"
-                
-            patch_target_path = target_pak.parent / patch_name
-            
-            # Orijinali EZMİYORUZ. Yanına yama olarak koyuyoruz!
             try:
-                if patch_target_path.exists(): patch_target_path.unlink() # Önceden kalan yamayı sil
-                shutil.move(str(temp_repack_output), str(patch_target_path))
-                if progress_callback: progress_callback(f"✅ Çeviri yaması eklendi: {patch_target_path.name}")
+                # Orijinal dosyayı yedekle (Kullanıcı seçeneğine göre)
+                if backup_enabled:
+                    backup_pak = target_pak.with_suffix(target_pak.suffix + ".bak")
+                    if not backup_pak.exists():
+                        if progress_callback: progress_callback(f"🛡️ Güvenlik Yedeği Oluşturuluyor: {backup_pak.name}")
+                        shutil.copy2(target_pak, backup_pak)
+                else:
+                    if progress_callback: progress_callback("⏩ Yedekleme devre dışı, doğrudan üzerine yazılıyor.")
+                
+                # Orijinal dosyayı sil ve yenisini taşı
+                if target_pak.exists(): target_pak.unlink()
+                shutil.move(str(temp_repack_output), str(target_pak))
+                
+                if progress_callback: progress_callback(f"✅ Orijinal dosya yamalandı: {target_pak.name}")
                     
             except Exception as e:
                 raise Exception(f"Dosya taşıma hatası: {e}")
+            
             end_time = time.time()
             duration = end_time - start_time
             
             if progress_callback:
-                progress_callback(f"✅ YAMA KURULUMU BAŞARILI!")
-                progress_callback(f" Dosya: {patch_target_path.name}")
-                progress_callback(f" (Orijinal {target_pak.name} korundu. Yama _P.pak olarak eklendi.)")
+                progress_callback(f"✅ ÇEVİRİ BAŞARIYLA TAMAMLANDI!")
+                progress_callback(f"📍 Dosya: {target_pak.name}")
+                progress_callback(f"⏱️ Süre: {duration:.2f} saniye")
                 
-            return str(patch_target_path)
+            return str(target_pak)
         finally:
             # Temizlik (Hata alsa bile programın devam etmesini sağlar)
             try:

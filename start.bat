@@ -1,14 +1,12 @@
 @echo off
-REM MemoFast - Başlatıcı
+REM MemoFast - Baslatlci (Sade versiyon - UTF-8 sorunu var)
 cd /d "%~dp0"
 
-REM Eğer zaten bir kopya çalışıyorsa (opsiyonel temizlik)
-REM taskkill /f /im python.exe /fi "windowtitle eq MemoFast*" /t 2>nul
-
 if exist "python_enbed\python.exe" (
-    start "" "python_enbed\python.exe" "memofast_gui.py"
+    "python_enbed\python.exe" "memofast_gui.py"
 ) else (
-    start "" python "memofast_gui.py"
+    python "memofast_gui.py"
 )
 
-exit
+pause
+exit /b %errorlevel%

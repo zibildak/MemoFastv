@@ -117,7 +117,7 @@ class AppUpdater:
             total_files = len(files_list)
             if total_files == 0:
                 if progress_callback: progress_callback(100, "Dosya listesi boş.")
-                return True
+                return True, "Dosya listesi boş."
             
             for idx, file_info in enumerate(files_list):
                 if cancel_check and cancel_check():
@@ -139,7 +139,8 @@ class AppUpdater:
                         global_pct = int(((idx * 100) + pct) / total_files)
                         progress_callback(global_pct, f"İndiriliyor: {rel_path} ({pct}%)")
 
-                self._download_single_file(url, target_path, _file_internal_progress, cancel_check, extract_zips=extract_zips)
+                expected_hash = file_info.get('sha256')
+                self._download_single_file(url, target_path, _file_internal_progress, cancel_check, extract_zips=extract_zips, expected_hash=expected_hash)
             
             if progress_callback: progress_callback(100, "Güncelleme Tamamlandı!")
             return True, "İşlem Başarılı"
@@ -149,24 +150,39 @@ class AppUpdater:
             if progress_callback: progress_callback(0, msg)
             return False, str(e)
 
-    def download_update(self, url, progress_callback=None):
-        """Uygulama güncellemesini (ZIP) indirir ve yolunu döner."""
+    def download_update(self, url, progress_callback=None, expected_hash=None):
+        """Uygulama güncellemesini (ZIP) indirir, (varsa) hash doğrular ve yolunu döner."""
         try:
             filename = url.split('/')[-1].split('?')[0] or "update.zip"
             if not filename.endswith('.zip'): filename += ".zip"
             target_path = self.cache_path / filename
-            
-            import urllib.request
-            def reporthook(blocknum, blocksize, totalsize):
-                if progress_callback and totalsize > 0:
-                    pct = int(blocknum * blocksize * 100 / totalsize)
-                    progress_callback(min(pct, 100))
-            
-            urllib.request.urlretrieve(url, str(target_path), reporthook)
+
+            # urlretrieve yerine timeout'lu stream indirme
+            self._download_stream(self._convert_drive_link(url), target_path, progress_callback)
+
+            if expected_hash:
+                actual_hash = self._calculate_sha256(target_path)
+                if actual_hash != expected_hash:
+                    logger.error(f"Güncelleme hash uyuşmazlığı! Beklenen: {expected_hash}, Alınan: {actual_hash}")
+                    try: target_path.unlink()
+                    except OSError: pass
+                    raise ValueError("Güvenlik Doğrulaması Başarısız: Güncelleme paketi bozuk veya değiştirilmiş!")
+                logger.info("✅ Güncelleme paketi doğrulandı (SHA-256)")
+
             return str(target_path)
         except Exception as e:
-            print(f"App download error: {e}")
+            logger.error(f"App download error: {e}")
             raise e
+
+    @staticmethod
+    def _safe_extract(zip_file, extract_dir):
+        """ZIP'i Zip-Slip (path traversal) korumasıyla çıkarır."""
+        extract_dir = Path(extract_dir).resolve()
+        for member in zip_file.namelist():
+            member_path = (extract_dir / member).resolve()
+            if extract_dir != member_path and extract_dir not in member_path.parents:
+                raise ValueError(f"Güvensiz ZIP girdisi engellendi: {member}")
+        zip_file.extractall(extract_dir)
 
     def apply_update(self, zip_path):
         """İndirilen güncellemeyi uygular."""
@@ -182,28 +198,36 @@ class AppUpdater:
             
             import zipfile
             with zipfile.ZipFile(zip_path, 'r') as z:
-                z.extractall(temp_extract)
-                
+                self._safe_extract(z, temp_extract)
+
+            # Yeniden başlatma komutu: exe > start.bat > python script
+            if getattr(sys, 'frozen', False):
+                restart_cmd = f'start "" "{Path(sys.executable)}"'
+            elif (self.base_path / "start.bat").exists():
+                restart_cmd = f'start "" "{self.base_path / "start.bat"}"'
+            else:
+                restart_cmd = f'start "" "{sys.executable}" "{self.base_path / "memofast_gui.py"}"'
+
             bat_script = self.base_path / "update_installer.bat"
             with open(bat_script, 'w') as f:
                 f.write(f'@echo off\n')
-                f.write(f'timeout /t 2 /nobreak >nul\n') 
+                f.write(f'timeout /t 2 /nobreak >nul\n')
                 f.write(f'xcopy "{temp_extract}\\*" "{self.base_path}\\" /E /H /Y\n')
                 f.write(f'rmdir /s /q "{temp_extract}"\n')
-                f.write(f'start "" "{self.base_path}\\memofast_gui.py"\n') 
-                f.write(f'del "%~f0"\n') 
-                
+                f.write(f'{restart_cmd}\n')
+                f.write(f'del "%~f0"\n')
+
             import subprocess
             CREATE_NO_WINDOW = 0x08000000
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = subprocess.SW_HIDE
-            subprocess.Popen([str(bat_script)], shell=True, startupinfo=si, creationflags=CREATE_NO_WINDOW)
-            sys.exit(0) 
-            
-            return True
+            subprocess.Popen(["cmd", "/c", str(bat_script)], startupinfo=si, creationflags=CREATE_NO_WINDOW)
+            sys.exit(0)
+        except SystemExit:
+            raise
         except Exception as e:
-            print(f"Apply update error: {e}")
+            logger.error(f"Apply update error: {e}")
             return False
 
     def _fetch_update_json(self):
@@ -271,24 +295,46 @@ class AppUpdater:
         except Exception as e:
             raise Exception(f"Download Error: {e} ({url})")
 
-    def _download_single_file(self, url, target_path, progress_callback=None, cancel_check=None, extract_zips=True):
-        """Linkteki dosyayı indirir."""
+    def _calculate_sha256(self, filepath):
+        """Dosyanın SHA-256 hash değerini hesaplar"""
+        import hashlib
+        sha256_hash = hashlib.sha256()
+        try:
+            with open(filepath, "rb") as f:
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+            return sha256_hash.hexdigest()
+        except Exception as e:
+            logger.error(f"Hash hesaplama hatası: {e}")
+            return None
+
+    def _download_single_file(self, url, target_path, progress_callback=None, cancel_check=None, extract_zips=True, expected_hash=None):
+        """Linkteki dosyayı indirir ve isteğe bağlı olarak hash doğrulaması yapar."""
         import zipfile 
         url = self._convert_drive_link(url)
-        temp_path = str(target_path) + f".tmp_{os.getpid()}" 
+        temp_path = Path(str(target_path) + f".tmp_{os.getpid()}")
         try:
             opener = urllib.request.build_opener()
             opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
             urllib.request.install_opener(opener)
             self._download_stream(url, temp_path, progress_callback, cancel_check)
             
+            # --- SHA-256 DOĞRULAMA ---
+            if expected_hash:
+                actual_hash = self._calculate_sha256(temp_path)
+                if actual_hash != expected_hash:
+                    logger.error(f"Hash Mismatch! Beklenen: {expected_hash}, Alınan: {actual_hash}")
+                    if temp_path.exists(): temp_path.unlink()
+                    raise ValueError(f"Güvenlik Doğrulaması Başarısız: {target_path.name} dosyası bozuk veya güvenli değil!")
+                logger.info(f"✅ Dosya doğrulandı: {target_path.name}")
+
             if extract_zips and zipfile.is_zipfile(temp_path):
                 with zipfile.ZipFile(temp_path, 'r') as z:
                     extract_dir = target_path
                     if target_path.exists() and target_path.is_file():
                         extract_dir = target_path.parent
                     extract_dir.mkdir(parents=True, exist_ok=True)
-                    z.extractall(extract_dir)
+                    self._safe_extract(z, extract_dir)
             else:
                 final_path = target_path
                 if final_path.is_dir():
@@ -297,12 +343,13 @@ class AppUpdater:
                 if final_path.exists():
                     try: os.remove(final_path)
                     except: pass
-                os.rename(temp_path, final_path)
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+                os.rename(str(temp_path), str(final_path))
+            
+            if temp_path.exists():
+                temp_path.unlink()
         except Exception as e:
-            if os.path.exists(temp_path):
-                try: os.remove(temp_path)
+            if temp_path.exists():
+                try: temp_path.unlink()
                 except: pass
             raise e
 
@@ -332,7 +379,7 @@ class AppUpdater:
             si.wShowWindow = subprocess.SW_HIDE
             start_bat = self.base_path / "start.bat"
             if start_bat.exists():
-                subprocess.Popen([str(start_bat)], shell=True, startupinfo=si, creationflags=CREATE_NO_WINDOW)
+                subprocess.Popen(["cmd", "/c", str(start_bat)], startupinfo=si, creationflags=CREATE_NO_WINDOW)
             else:
                 subprocess.Popen([python, str(script)], startupinfo=si, creationflags=CREATE_NO_WINDOW)
             sys.exit(0)

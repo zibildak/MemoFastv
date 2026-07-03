@@ -478,7 +478,6 @@ class GameEngineScanner:
             try:
                 hkey = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Software\\Valve\\Steam")
                 main_steam_path = winreg.QueryValueEx(hkey, "SteamPath")[0]
-                # Registry path bazen / kullanır, düzeltelim
                 main_steam_path = str(Path(main_steam_path))
                 
                 paths.add(str(Path(main_steam_path) / "steamapps" / "common"))
@@ -492,52 +491,73 @@ class GameEngineScanner:
         except ImportError:
             pass
 
-        # 2. Varsayılan Paths (Fallback)
+        # 2. Varsayılan Paths (Tüm Sürücüler)
         drives = [f"{d}:\\" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{d}:\\")]
         for drive in drives:
-            # Common Steam Paths (Registry bulamazsa diye)
+            # Steam
             paths.add(str(Path(drive) / "Program Files (x86)" / "Steam" / "steamapps" / "common"))
-            paths.add(str(Path(drive) / "Steam" / "steamapps" / "common")) # [YENİ] Klasik Steam yolu
+            paths.add(str(Path(drive) / "Program Files" / "Steam" / "steamapps" / "common"))
+            paths.add(str(Path(drive) / "Steam" / "steamapps" / "common"))
             paths.add(str(Path(drive) / "SteamLibrary" / "steamapps" / "common"))
-            # Common Epic Paths
+            
+            # Epic Games
             paths.add(str(Path(drive) / "Program Files" / "Epic Games"))
+            paths.add(str(Path(drive) / "Program Files (x86)" / "Epic Games"))
             paths.add(str(Path(drive) / "Epic Games"))
-            # [YENİ] Genel Oyun Klasörleri
+            paths.add(str(Path(drive) / "EpicGames")) # Boşluksuz varyasyon
+            
+            # EA / Ubisoft / GOG / Diğer
             paths.add(str(Path(drive) / "Games"))
             paths.add(str(Path(drive) / "Oyunlar"))
             paths.add(str(Path(drive) / "My Games"))
+            paths.add(str(Path(drive) / "GOG Games"))
+            paths.add(str(Path(drive) / "Ubisoft" / "Games"))
+            paths.add(str(Path(drive) / "EA Games"))
+            paths.add(str(Path(drive) / "XboxGames"))
 
         return [p for p in paths if os.path.exists(p)]
 
     def _scan_epic_manifests(self):
-        """Epic Games Manifest dosyalarını tara (ProgramData)"""
+        """Epic Games Manifest dosyalarını tara (ProgramData ve AppData)"""
         epic_games = []
+        manifest_locations = []
+        
         try:
-            # ProgramData içindeki Epic manifestleri
+            # 1. ProgramData (Genel)
             prog_data = os.environ.get('ProgramData')
-            if not prog_data:
-                prog_data = "C:\\ProgramData"
+            if prog_data:
+                manifest_locations.append(Path(prog_data) / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests")
             
-            manifests_path = Path(prog_data) / "Epic" / "EpicGamesLauncher" / "Data" / "Manifests"
-            if manifests_path.exists():
-                for item_file in manifests_path.glob("*.item"):
-                    try:
-                        with open(item_file, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
+            # 2. LocalAppData (Kullanıcı bazlı)
+            local_app_data = os.environ.get('LocalAppData')
+            if local_app_data:
+                manifest_locations.append(Path(local_app_data) / "EpicGamesLauncher" / "Saved" / "Manifests")
+            
+            for manifests_path in manifest_locations:
+                if manifests_path.exists():
+                    for item_file in manifests_path.glob("*.item"):
+                        try:
+                            with open(item_file, 'r', encoding='utf-8') as f:
+                                data = json.load(f)
+                                
+                            install_loc = data.get("InstallLocation")
+                            display_name = data.get("DisplayName")
+                            app_name = data.get("AppName")
                             
-                        install_loc = data.get("InstallLocation")
-                        display_name = data.get("DisplayName")
-                        app_name = data.get("AppName")
-                        
-                        if install_loc and os.path.exists(install_loc):
-                            epic_games.append({
-                                'path': Path(install_loc),
-                                'name': display_name,
-                                'appid': app_name,
-                                'platform': 'Epic Games'
-                            })
-                    except: pass
-        except: pass
+                            if install_loc:
+                                # Path temizliği (Epic bazen ters slash veya çift slash kullanır)
+                                clean_path = Path(install_loc.replace('\\\\', '\\').replace('/', '\\'))
+                                if clean_path.exists():
+                                    epic_games.append({
+                                        'path': clean_path,
+                                        'name': display_name or app_name or clean_path.name,
+                                        'appid': app_name,
+                                        'platform': 'Epic Games'
+                                    })
+                        except: pass
+        except Exception as e:
+            logger.error(f"Epic manifest tarama hatası: {e}")
+            
         return epic_games
 
     def _scan_gog(self):
@@ -747,42 +767,64 @@ class GameEngineScanner:
             path_str = str(lib_path).lower()
             if "steam" in path_str:
                 platform = "Steam"
-            elif "epic" in path_str: # Manifest dışı Epic klasörleri
+            elif "epic" in path_str:
                 platform = "Epic Games"
+            elif "gog" in path_str:
+                platform = "GOG"
+            elif "xbox" in path_str or "ms store" in path_str:
+                platform = "Xbox / MS Store"
             else:
                 platform = "Diğer"
 
             try:
-                # Kütüphane içindeki klasörleri gez
                 lib_p = Path(lib_path)
                 if not lib_p.exists(): continue
                 
-                for item in lib_p.iterdir():
-                    if item.is_dir():
-                        # Sistem klasörlerini atla
-                        if item.name in excluded_folders or item.name.startswith('.'):
-                            continue
-                        # Kullanıcı klasörünü atla (Çok uzun sürer)
-                        if item.name == "Users":
-                            continue
+                # Fraktal Tarama (Kök sürücülerde 3 seviye derine in, diğerlerinde 1 seviye yeterli)
+                max_depth = 3 if len(lib_p.parts) <= 1 else 1
+                
+                def fractal_scan(current_path, current_depth):
+                    if current_depth > max_depth:
+                        return
+                        
+                    try:
+                        for item in current_path.iterdir():
+                            if not item.is_dir(): continue
+                            
+                            # Katı sistem klasörlerini tamamen atla (içine girme)
+                            if item.name in excluded_folders or item.name.startswith('.') or item.name.startswith('$'):
+                                continue
+                                
+                            if item.name == "Users" or item.name.lower() in ["appdata", "microsoft", "intel", "amd", "nvidia"]:
+                                continue
 
-                        # Eğer bu klasör zaten bir kütüphane yolu ise, içeriğini ayrıca tarayacağız,
-                        # burada analyze etmeye gerek yok (Örn: C:/ -> C:/Program Files)
-                        is_library = False
-                        for lp in library_paths:
-                            if str(item).lower() == str(lp).lower():
-                                is_library = True
-                                break
-                        if is_library:
-                            continue
+                            # Eğer bu klasör zaten bir kütüphane yolu ise atla (çift tarama önleme)
+                            is_library = False
+                            item_path_norm = str(item).lower().rstrip('\\/')
+                            for lp in library_paths:
+                                if lp != lib_path and item_path_norm == str(lp).lower().rstrip('\\/'):
+                                    is_library = True
+                                    break
+                            if is_library:
+                                continue
 
-                        game_info = self._analyze_game_folder(item, platform)
-                        if game_info:
-                            # Tekrar kontrolü (Path'e göre)
-                            if not any(g['path'] == game_info['path'] for g in self.found_games):
-                                self.found_games.append(game_info)
+                            # Klasörü oyun olarak analiz et
+                            game_info = self._analyze_game_folder(item, platform)
+                            if game_info:
+                                if not any(g['path'] == game_info['path'] for g in self.found_games):
+                                    self.found_games.append(game_info)
+                                # Oyun bulduysak daha da derine inme (performans tasarrufu)
+                                continue
+                                
+                            # Oyun değilse (Örn: Program Files klasörü) ve derinlik hakkımız varsa içine gir
+                            fractal_scan(item, current_depth + 1)
+                            
+                    except (PermissionError, OSError):
+                        pass
+
+                fractal_scan(lib_p, 1)
+
             except Exception as e:
-                # print(f"Hata ({lib_path}): {e}")
                 pass
                 
         return self.found_games
@@ -799,6 +841,18 @@ class GameEngineScanner:
         
         # Eğer klasör adı direkt yasaklı listesindeyse
         if folder_path.name in excluded_roots:
+            return None
+            
+        # Oyun olmayan uygulamaları engelleme (Örn: LibreOffice, LagoFast)
+        excluded_app_keywords = [
+            "lagofast", "libreoffice", "adobe", "google", "chrome", 
+            "firefox", "spotify", "discord", "zoom", "teams", "vlc", "obs-studio", 
+            "postman", "slack", "cefcache", "cache", "temp", "tmp", "nvidia", 
+            "amd", "realtek", "overwolf", "system32", "syswow64", "onedrive"
+        ]
+        
+        path_lower = str(folder_path).lower()
+        if any(kw in path_lower for kw in excluded_app_keywords):
             return None
 
         # Steam Metadata (ACF) Kontrolü
@@ -859,7 +913,14 @@ class GameEngineScanner:
                 if list(target.glob("*.ovl")) or list(target.glob("win64/*.ovl")):
                     return self._create_game_info(target, "Cobra Engine", platform, steam_metadata)
 
-                # 4. UNREAL KONTROLÜ
+                # 4. REN'PY KONTROLÜ
+                if (target / "renpy").exists() and (target / "game").exists():
+                    return self._create_game_info(target, "Ren'Py", platform, steam_metadata)
+                game_dir = target / "game"
+                if game_dir.exists() and (list(game_dir.glob("*.rpa")) or list(game_dir.glob("*.rpyc"))):
+                    return self._create_game_info(target, "Ren'Py", platform, steam_metadata)
+
+                # 5. UNREAL KONTROLÜ
                 # a. Engine/Binaries yapısı
                 if (target / "Engine" / "Binaries").exists():
                     return self._create_game_info(target, "Unreal", platform, steam_metadata)
@@ -943,6 +1004,13 @@ class GameEngineScanner:
         game_name = path.name
         appid = ""
         
+        # Jenerik klasör isimleri yerine üst klasörün adını kullan
+        generic_names = ['windowsnoeditor', 'client', 'binaries', 'game', 'data', 'app', 'core', 'engine', 'win64', 'retail', 'shipping', 'content']
+        current_p = path
+        while current_p.name.lower() in generic_names and current_p.parent != current_p:
+            current_p = current_p.parent
+            game_name = current_p.name
+
         if metadata:
             if 'name' in metadata: game_name = metadata['name']
             if 'appid' in metadata: appid = metadata['appid']

@@ -57,3 +57,22 @@ ping_booster_dev/
 # Gemini agent
 .agent/
 .gemini/
+
+# Geliştirme artıkları / debug çıktıları
+nuitka-crash-report.xml
+diff_*.txt
+debug_log.txt
+ocr_debug_log.txt
+gui_run_output.txt
+memofast_launch.log
+*_Dump.csv
+unins000.dat
+tmp/
+scratch/
+aes_keys.json
+
+# Yerel deneysel klasörler (repo'ya girmemeli)
+RSTGameTranslation/
+unrpa-2.3.0/
+gemma/models/
+agent/agent.pid

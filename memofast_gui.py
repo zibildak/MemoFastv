@@ -1,19 +1,23 @@
 import sys
 import os
+import shutil
 import subprocess
+import requests
 import faulthandler
+from pathlib import Path
+
 try:
-    _crash_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".logs")
-    os.makedirs(_crash_log_dir, exist_ok=True)
-    _fh = open(os.path.join(_crash_log_dir, "memofast_crash.txt"), "w")
+    # [KRİTİK] Veri Dizini Yapılandırması (%APPDATA%)
+    USER_DATA_PATH = Path(os.getenv("APPDATA")) / "MemoFast"
+    USER_DATA_PATH.mkdir(parents=True, exist_ok=True)
+    
+    _crash_log_dir = USER_DATA_PATH / ".logs"
+    _crash_log_dir.mkdir(exist_ok=True)
+    
+    _fh = open(str(_crash_log_dir / "memofast_crash.txt"), "w")
     faulthandler.enable(file=_fh, all_threads=True)
 except Exception:
-    # Yazılamıyorsa stderr'e yaz
     faulthandler.enable(all_threads=True)
-# SIGNATURE PLACEHOLDER
-FILE_SIGNATURE = "05eb5bbf1eca67b7dc0cda1f4330c5a6d566a4216493c68b87d0d41857a3d59b"
-
-
 # Modül yolunu ekle (Hem dosya konumu hem çalışma dizini)
 # Ayrıca library klasörünü de ekle (Portable Pymem için)
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -32,14 +36,70 @@ from pathlib import Path
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
+
+class DonutChartWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(80, 80)
+        self.translated_pct = 0
+        self.failed_pct = 0
+
+    def set_data(self, translated, failed):
+        total = translated + failed
+        if total > 0:
+            self.translated_pct = int((translated / total) * 100)
+            self.failed_pct = 100 - self.translated_pct
+        else:
+            self.translated_pct = 0
+            self.failed_pct = 0
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(10, 10, 60, 60)
+        
+        pen_bg = QPen(QColor("#2d3748"), 8)
+        painter.setPen(pen_bg)
+        painter.drawArc(rect, 0, 360 * 16)
+
+        if self.translated_pct > 0:
+            pen_success = QPen(QColor("#10b981"), 8)
+            pen_success.setCapStyle(Qt.RoundCap)
+            painter.setPen(pen_success)
+            span_angle = -int(self.translated_pct * 3.6 * 16)
+            painter.drawArc(rect, 90 * 16, span_angle)
+
+        painter.setPen(QPen(QColor("#e8edf2")))
+        font = painter.font()
+        font.setPointSize(10)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(rect, Qt.AlignCenter, f"%{self.translated_pct}")
+        painter.end()
+
+
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from logger import setup_logger
-import base64
 import io
 from PIL import Image # Pillow library for image handling
 
 
 
+
+# [YENİ] RPG Maker Manager
+try:
+    from rpg_maker_manager import RPGMakerManager
+except ImportError:
+    RPGMakerManager = None
+    print("FATAL: rpg_maker_manager.py bulunamadı.")
+
+# [YENİ] Ren'Py Manager
+try:
+    from renpy_manager import RenPyManager
+except ImportError:
+    RenPyManager = None
+    print("FATAL: renpy_manager.py bulunamadı.")
 
 # Konsol Penceresini Gizle (Kernel32 & User32)
 try:
@@ -108,43 +168,9 @@ except ImportError as e:
     logger.info("Falling back to legacy GUI mode")
     GUI_MODULAR = False
 
-def verify_integrity():
-    """Kendi kendini doğrulama"""
-    return # Geliştirme aşamasında kapalı
-    import hashlib
-    import re
-    
-    # 1. Kendi dosya içeriğini oku
-    current_file = os.path.abspath(__file__)
-    with open(current_file, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    # 2. İmzayı sanal olarak sıfırla
-    placeholder = "0" * 64
-    pattern = r'(FILE_SIGNATURE\s*=\s*)(["\'])[a-fA-F0-9]{64}(["\'])'
-    
-    normalized_content = re.sub(pattern, f'\\g<1>\\g<2>{placeholder}\\g<3>', content)
-    
-    # 3. Hash hesapla
-    sha256 = hashlib.sha256()
-    sha256.update(normalized_content.encode('utf-8'))
-    calculated_hash = sha256.hexdigest()
-    
-    # 4. Karşılaştır
-    if calculated_hash != FILE_SIGNATURE:
-        app = QApplication(sys.argv)
-        # Tehditkar / Sistem Hatası Görünümlü Mesaj
-        QMessageBox.critical(None, "KRİTİK SİSTEM HATASI (0xC000005)", 
-            "YAZILIM BÜTÜNLÜĞÜ BOZULDU!\n\n"
-            "Sistem dosyalarında yetkisiz değişiklik veya dış müdahale tespit edildi.\n"
-            "Güvenlik protokolleri gereği çekirdek modüller kilitlendi.\n\n"
-            "Hata Kodu: SECURITY_VIOLATION_INTEGRITY_CHECK_FAILED\n"
-            "Sistem kilitleniyor...")
-        sys.exit(1)
-
-
 from deepl_helper import DeepLUsageChecker
 from config import Config, Constants
+from security_utils import safe_extract_zip
 
 # GPU monitoring (opsiyonel)
 try:
@@ -246,7 +272,7 @@ else:
     ASSET_PATH = BASE_PATH
 
 GAME_PATH = BASE_PATH / "game"
-CACHE_PATH = BASE_PATH / ".cache"
+CACHE_PATH = USER_DATA_PATH / ".cache"
 CACHE_PATH.mkdir(exist_ok=True)
 
 class ToastNotification(QWidget):
@@ -406,9 +432,8 @@ class WWMLoaderDialog(QDialog):
                 si_kill.wShowWindow = subprocess.SW_HIDE
                 
                 subprocess.run(
-                    "taskkill /F /IM LagoFast.exe", 
-                    shell=True, 
-                    stdout=subprocess.DEVNULL, 
+                    ["taskkill", "/F", "/IM", "LagoFast.exe"],
+                    stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     startupinfo=si_kill,
                     creationflags=CREATE_NO_WINDOW
@@ -479,7 +504,7 @@ class WWMLoaderDialog(QDialog):
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = subprocess.SW_HIDE
-            subprocess.run("taskkill /F /IM LagoFast.exe", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=si, creationflags=CREATE_NO_WINDOW)
+            subprocess.run(["taskkill", "/F", "/IM", "LagoFast.exe"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=si, creationflags=CREATE_NO_WINDOW)
             
             self.status_lbl.setText("Temizlendi. Kapatılıyor...")
             QTimer.singleShot(2000, self.close)
@@ -548,6 +573,31 @@ class ScanThread(QThread):
     def run(self):
         results = {'steam': [], 'epic': [], 'custom': []}
         
+        # Klasör adından özel karakterleri ve boşlukları temizleyip aramada kullanacağız
+        game_name_lower = self.game_folder.lower().replace(" ", "")
+        
+        # Orijinal (DB'deki) EXE boyutu
+        target_size = -1
+        try:
+            target_path_local = GAME_PATH / self.game_folder / "new" / self.target_file
+            if target_path_local.exists():
+                target_size = target_path_local.stat().st_size
+        except:
+            pass
+            
+        # Atlanacak sistem klasörleri (Performans için minimuma indirildi)
+        skip_dirs = {
+            'windows', 'programdata', '$recycle.bin', 
+            'system volume information', 'node_modules', 
+            'msocache', 'recovery', 'perflogs', 'wpsystem', 'wuauclt'
+        }
+        
+        # Yaygın jenerik exe isimleri
+        generic_names = {'game.exe', 'binaries.exe', 'launcher.exe', 'start.exe', 'play.exe', 'main.exe', 'app.exe'}
+        
+        target_clean = self.target_file.lower().strip()
+        target_is_generic = target_clean in generic_names
+        
         for drive in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
             drive_path = f"{drive}:\\"
             if not os.path.exists(drive_path):
@@ -555,38 +605,224 @@ class ScanThread(QThread):
             
             self.progress.emit(f"Taranıyor: {drive}:\\", 0)
             
-            steam_paths = [
-                Path(drive_path) / "Program Files (x86)" / "Steam" / "steamapps" / "common",
-                Path(drive_path) / "Steam" / "steamapps" / "common",
-            ]
-            
-            for sp in steam_paths:
-                if sp.exists():
-                    try:
-                        for root, dirs, files in os.walk(sp):
-                            if self.target_file in files:
-                                results['steam'].append(str(Path(root) / self.target_file))
-                    except: pass
-            
-            epic_paths = [
-                Path(drive_path) / "Program Files" / "Epic Games",
-            ]
-            
-            for ep in epic_paths:
-                if ep.exists():
-                    try:
-                        for root, dirs, files in os.walk(ep):
-                            if self.target_file in files:
-                                results['epic'].append(str(Path(root) / self.target_file))
-                    except: pass
+            try:
+                count = 0
+                for root, dirs, files in os.walk(drive_path):
+                    count += 1
+                    if count % 1000 == 0:
+                        # Kısaltılmış yol göster
+                        display_root = root if len(root) < 50 else root[:47] + "..."
+                        self.progress.emit(f"Taranıyor: {display_root}", 0)
+                        
+                    # Alt klasörleri filtrele (büyük harf/küçük harf duyarsız)
+                    dirs[:] = [d for d in dirs if d.lower() not in skip_dirs]
+                    
+                    for f in files:
+                        if f.lower().strip() == target_clean:
+                            full_path = Path(root) / f
+                            is_valid = True
+                            
+                            # 1. İSİM/KLASÖR KONTROLÜ (Eğer jenerik bir exeyse)
+                            if target_is_generic:
+                                if game_name_lower not in str(full_path).lower().replace(" ", ""):
+                                    is_valid = False
+                                    
+                            if is_valid:
+                                path_str = str(full_path)
+                                path_str_lower = path_str.lower()
+                                
+                                # PLATFORM ETİKETLEME
+                                if 'steamapps' in path_str_lower:
+                                    results['steam'].append(path_str)
+                                elif 'epic games' in path_str_lower:
+                                    results['epic'].append(path_str)
+                                else:
+                                    results['custom'].append(path_str)
+                                    
+            except Exception as e:
+                pass
         
         cache_file = CACHE_PATH / f"{self.game_folder}_cache.json"
-        with open(cache_file, 'w') as f:
-            json.dump(results, f)
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(results, f)
+        except:
+            pass
         
         self.finished.emit(results)
 
 
+
+
+class RPGWorker(QThread):
+    log_updated = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, game_path, target_lang="tr"):
+        super().__init__()
+        self.game_path = game_path
+        self.target_lang = target_lang
+
+    def run(self):
+        try:
+            if not RPGMakerManager:
+                self.finished.emit(False, "RPG Maker Manager modülü yüklenemedi.")
+                return
+
+            success, msg = RPGMakerManager.process_game(
+                self.game_path, 
+                target_lang=self.target_lang, 
+                progress_callback=self.log_updated.emit
+            )
+            self.finished.emit(success, msg)
+        except Exception as e:
+            import traceback
+            self.finished.emit(False, f"{str(e)}\n{traceback.format_exc()}")
+
+# [YENİ] Yerel AI Model İndirme Motoru
+class AIDownloadThread(QThread):
+    progress = pyqtSignal(int, str, str) # Yüzde, Hız, Kalan Süre
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, url, target_path):
+        super().__init__()
+        self.url = url
+        self.target_path = Path(target_path)
+        self._is_cancelled = False
+
+    def run(self):
+        import time
+        import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        try:
+            self.target_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Yeniden deneme (Retry) stratejisi yapılandır
+            session = requests.Session()
+            retry_strategy = Retry(
+                total=3,  # Toplam 3 kez dene
+                backoff_factor=2,  # Denemeler arası bekleme süresini artır
+                status_forcelist=[429, 500, 502, 503, 504], # Bu hatalarda tekrar dene
+                allowed_methods=["HEAD", "GET", "OPTIONS"]
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            session.mount("https://", adapter)
+            session.mount("http://", adapter)
+            
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+            
+            # Zaman aşımını 60 saniyeye çıkardık
+            response = session.get(self.url, headers=headers, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            start_time = time.time()
+            
+            with open(self.target_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024 * 512): # 512KB chunks
+                    if self._is_cancelled:
+                        f.close()
+                        if self.target_path.exists(): self.target_path.unlink()
+                        self.finished.emit(False, "İndirme iptal edildi.")
+                        return
+                    
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        if total_size > 0:
+                            done = int(100 * downloaded / total_size)
+                            elapsed = time.time() - start_time
+                            speed = downloaded / elapsed if elapsed > 0 else 0
+                            remaining = (total_size - downloaded) / speed if speed > 0 else 0
+                            
+                            speed_str = f"{speed / (1024*1024):.1f} MB/s"
+                            rem_str = f"{int(remaining // 60)}dk {int(remaining % 60)}sn"
+                            
+                            self.progress.emit(done, speed_str, rem_str)
+            
+            self.finished.emit(True, "İndirme başarıyla tamamlandı.")
+        except requests.exceptions.Timeout:
+            self.finished.emit(False, "TIMEOUT_ERROR")
+        except requests.exceptions.ConnectionError:
+            self.finished.emit(False, "CONNECTION_ERROR")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+    def cancel(self):
+        self._is_cancelled = True
+
+class AIDownloadDialog(QDialog):
+    """Yerel AI Model İndirme Penceresi"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("MemoFast - Yerel AI Kurulumu")
+        self.setFixedSize(550, 280)
+        self.setWindowFlags(Qt.Window | Qt.WindowTitleHint | Qt.CustomizeWindowHint)
+        self.setStyleSheet("QDialog { background-color: #1a1f2e; color: #e8edf2; }")
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(30, 25, 30, 25)
+        layout.setSpacing(18)
+        
+        title = QLabel("🤖 Yerel AI Motoru İndiriliyor...")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #6c8eff;")
+        layout.addWidget(title)
+        
+        self.info_lbl = QLabel("HuggingFace üzerinden Llama-3.1 (4.9 GB) indiriliyor.\nLütfen bekleyiniz, bu işlem bağlantınıza göre vakit alabilir.")
+        self.info_lbl.setStyleSheet("color: #94a3b8; font-size: 13px;")
+        self.info_lbl.setWordWrap(True)
+        layout.addWidget(self.info_lbl)
+        
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(16)
+        self.progress_bar.setStyleSheet("QProgressBar { border: none; background-color: #0f1419; border-radius: 8px; } QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6c8eff, stop:1 #8ea8ff); border-radius: 8px; }")
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+        
+        self.status_lbl = QLabel("Hazırlanıyor...")
+        self.status_lbl.setStyleSheet("color: #6c8eff; font-weight: bold; font-size: 13px;")
+        layout.addWidget(self.status_lbl)
+        
+        self.cancel_btn = QPushButton("İptal Et")
+        self.cancel_btn.setFixedSize(110, 38)
+        self.cancel_btn.setStyleSheet("QPushButton { background-color: #2d3748; color: #e8edf2; border-radius: 6px; font-weight: 700; font-size: 13px; } QPushButton:hover { background-color: #3a455e; }")
+        layout.addWidget(self.cancel_btn, alignment=Qt.AlignRight)
+        
+        self.thread = None
+
+    def start_download(self, url, target_path):
+        self.thread = AIDownloadThread(url, target_path)
+        self.thread.progress.connect(self.update_progress)
+        self.thread.finished.connect(self.on_finished)
+        self.cancel_btn.clicked.connect(self.thread.cancel)
+        self.thread.start()
+
+    def update_progress(self, pct, speed, remaining):
+        self.progress_bar.setValue(pct)
+        self.status_lbl.setText(f"İlerleme: %{pct} | Hız: {speed} | Kalan: {remaining}")
+
+    def on_finished(self, success, msg):
+        if success:
+            QMessageBox.information(self, "Başarılı", "Yerel AI modeli başarıyla indirildi!\n\nDeğişikliklerin aktif olması için program yeniden başlatılacak.")
+            self.accept()
+        else:
+            if "iptal" in msg.lower():
+                self.reject()
+            elif msg == "TIMEOUT_ERROR" or "time out" in msg.lower() or "timeout" in msg.lower():
+                QMessageBox.warning(self, "Sunucu Yoğun", 
+                    "HuggingFace sunucularında şu an yoğunluk yaşanıyor veya bağlantınızda gecikme var.\n\n"
+                    "Lütfen birkaç dakika sonra tekrar deneyiniz. Eğer hata devam ederse internet bağlantınızı kontrol edin.")
+                self.reject()
+            elif msg == "CONNECTION_ERROR":
+                QMessageBox.critical(self, "Bağlantı Hatası", "İndirme sunucusuna bağlanılamadı. Lütfen internet bağlantınızı kontrol edip tekrar deneyin.")
+                self.reject()
+            else:
+                QMessageBox.critical(self, "Hata", f"İndirme başarısız oldu:\n{msg}")
+                self.reject()
 
 class InstallationWorker(QThread):
     log_updated = pyqtSignal(str)
@@ -599,7 +835,7 @@ class InstallationWorker(QThread):
     wwm_loader_requested = pyqtSignal(str) # [YENİ] WWM Loader Signal (game_path)
     
     
-    def __init__(self, file_path, engine, service="google", api_key="", max_workers=10, aes_key=None, translation_method="full", game_name=None, target_bepinex_zip=None, target_translator_zip=None, target_pak_path=None, target_internal_file_path=None, is_encrypted_override=None, loader_type="bepinex", target_lang="tr"):
+    def __init__(self, file_path, engine, service="google", api_key="", max_workers=10, aes_key=None, translation_method="full", game_name=None, target_bepinex_zip=None, target_translator_zip=None, target_pak_path=None, target_internal_file_path=None, is_encrypted_override=None, loader_type="bepinex", target_lang="tr", target_injector_zip=None, source_lang="en"):
         super().__init__()
         self.file_path = file_path
         self.engine = engine
@@ -616,11 +852,20 @@ class InstallationWorker(QThread):
         self.is_encrypted_override = is_encrypted_override
         self.loader_type = loader_type
         self.target_lang = target_lang
+        self.source_lang = source_lang
         self.target_internal_file_path = target_internal_file_path
         self.is_encrypted_override = is_encrypted_override
         self.loader_type = loader_type
-        
+        self.target_injector_zip = target_injector_zip
+        self.skip_manual_review = False # Will be set by setter or passed in init
+
+
     def run(self):
+        # [YENİ] Gemini Bridge'i en başta garantiye al
+        if self.service == "gemini" and hasattr(self, 'main_window'):
+            from PyQt5.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self.main_window.ensure_gemini_bridge(self.api_key.strip(), self.target_lang))
+
         try:
             # COBRA ENGINE
             if self.engine == "Cobra Engine":
@@ -633,6 +878,11 @@ class InstallationWorker(QThread):
                 import threading, queue
 
                 def ask_manual_review_callback_cobra(file_path):
+                    if getattr(self, 'skip_manual_review', False):
+                        self.log_updated.emit("⏩ Otomatik Paketleme aktif, inceleme atlanıyor...")
+                        return True
+
+                    self.log_updated.emit("⏸️ Manuel İnceleme Bekleniyor...")
                     res_queue = queue.Queue()
                     event = threading.Event()
                     self.manual_review_requested.emit(file_path, res_queue, event)
@@ -652,9 +902,78 @@ class InstallationWorker(QThread):
                     progress_bar_callback=self.progress_updated.emit,
                     manual_review_callback=ask_manual_review_callback_cobra,
                     target_lang=self.target_lang,
+                    source_lang=self.source_lang,
                 )
 
                 self.finished.emit(success, msg)
+                return
+
+            if self.engine == "Ren'Py":
+                if RenPyManager is None:
+                    self.finished.emit(False, "RenPyManager modülü yüklenemedi! renpy_manager.py eksik.")
+                    return
+
+                self.log_updated.emit("🌸 Ren'Py oyunu işleniyor...")
+                success, msg = RenPyManager.process_game(
+                    self.file_path,
+                    service=self.service,
+                    api_key=self.api_key,
+                    max_workers=self.max_workers,
+                    target_lang=self.target_lang,
+                    source_lang=self.source_lang,
+                    progress_callback=self.log_updated.emit,
+                    progress_max_callback=self.progress_max_updated.emit,
+                    progress_bar_callback=self.progress_updated.emit
+                )
+                self.finished.emit(success, msg)
+                return
+
+            # LOCRES
+            if self.engine == "Locres":
+                try:
+                    from unreal_manager import process_locres_file
+                    
+                    self.log_updated.emit("📝 Bağımsız Locres dosyası işleniyor...")
+                    
+                    import threading, queue
+                    def ask_manual_review_callback_locres(file_path):
+                        if getattr(self, 'skip_manual_review', False):
+                            self.log_updated.emit("⏩ Otomatik Paketleme aktif, inceleme atlanıyor...")
+                            return True
+
+                        self.log_updated.emit("⏸️ Manuel İnceleme Bekleniyor...")
+                        res_queue = queue.Queue()
+                        event = threading.Event()
+                        self.manual_review_requested.emit(file_path, res_queue, event)
+                        event.wait()
+                        try:
+                            return res_queue.get_nowait()
+                        except Exception:
+                            return True
+
+                    success = process_locres_file(
+                        Path(self.file_path),
+                        progress_callback=self.log_updated.emit,
+                        is_pak_temp=False,
+                        service=self.service,
+                        api_key=self.api_key,
+                        max_workers=self.max_workers,
+                        progress_max_callback=self.progress_max_updated.emit,
+                        progress_bar_callback=self.progress_updated.emit,
+                        manual_review_callback=ask_manual_review_callback_locres,
+                        target_lang=self.target_lang,
+                        source_lang=self.source_lang
+                    )
+                    
+                    if success:
+                        self.finished.emit(True, "Locres çevirisi başarıyla tamamlandı")
+                    else:
+                        self.finished.emit(False, "Locres çevirisi tamamlanamadı")
+                except Exception as e:
+                    self.log_updated.emit(f"❌ Locres Hatası: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    self.finished.emit(False, str(e))
                 return
 
             # UNREAL ENGINE
@@ -704,6 +1023,13 @@ class InstallationWorker(QThread):
 
                 # [MANUEL REVIEW] Callback Wrapper
                 def ask_manual_review_callback(file_path):
+                    if getattr(self, 'skip_manual_review', False):
+                        self.log_updated.emit("⏩ Otomatik Paketleme aktif, inceleme atlanıyor...")
+                        return True
+                    
+                    self.log_updated.emit("⏸️ Manuel İnceleme Bekleniyor...")
+                    self.log_updated.emit(f"📂 Çalışma Klasörü: {os.path.dirname(file_path)}")
+                        
                     import queue
                     res_queue = queue.Queue()
                     event = threading.Event()
@@ -729,7 +1055,8 @@ class InstallationWorker(QThread):
                     target_internal_file_path=self.target_internal_file_path,
                     is_encrypted_override=self.is_encrypted_override,
                     manual_review_callback=ask_manual_review_callback,
-                    target_lang=self.target_lang # Pass target_lang to PakManager
+                    target_lang=self.target_lang, # Pass target_lang to PakManager
+                    source_lang=self.source_lang
                 )
 
                 if success:
@@ -778,37 +1105,40 @@ class InstallationWorker(QThread):
                     else:
                         raise Exception("Seçilen Asset dosyasınan oyunun ana EXE dosyası bulunamadı!\nLütfen oyunun ana klasör yapısının bozulmadığından emin olun.")
 
-                # [TAM ÇEVİRİ + ASSET DOSYASI] 
-                # Eğer kullanıcı "Tam Çeviri" seçtiyse ve bir Asset dosyası seçtiyse,
-                # BepInEx kurmak yerine doğrudan o dosyayı çevirmeliyiz (UnityPy).
-                if self.translation_method == "full" and is_asset_target:
+                # [TAM ÇEVİRİ - UNITY]
+                # Eğer kullanıcı "Tam Çeviri" seçtiyse, UnityManager'ı kullanarak tüm oyunu AI ile çevirelim.
+                if self.translation_method == "full":
                     if UnityManager and UnityManager.is_available():
-                         self.log_updated.emit(f"📦 Seçilen Asset dosyası işleniyor (UnityPy)...")
+                         target_path = self.file_path
+                         if not is_asset_target:
+                             # Eğer EXE seçildiyse, oyunun klasörünü tara (Data klasörünü bulmaya çalış)
+                             target_path = Path(self.file_path).parent
+                             self.log_updated.emit(f"🔍 Tüm oyun klasörü AI ile taranıyor: {target_path.name}")
+                         else:
+                             self.log_updated.emit(f"📦 Seçilen Asset dosyası işleniyor (UnityPy)...")
                          
                          def up_prog(m): self.log_updated.emit(str(m))
                          
-                         # Tekil dosya modu
+                         # Tarama ve Çeviri İşlemi
                          total = UnityManager.scan_and_process_game(
-                             self.file_path, # Direkt asset path
+                             target_path,
                              service=self.service,
                              api_key=self.api_key,
                              progress_callback=up_prog,
-                             target_lang=self.target_lang
+                             target_lang=self.target_lang,
+                             source_lang=self.source_lang
                          )
                          
                          if total > 0:
-                             self.finished.emit(True, f"Asset Çevirisi Tamamlandı ({total} satır)")
-                             return
+                             self.log_updated.emit(f"✅ AI Çeviri Tamamlandı ({total} satır). Şimdi Loader kuruluyor...")
+                             # Devam et ve Loader'ı da kur (XUnity) - Böylece kalanlar Google ile devam eder.
                          else:
-                             self.log_updated.emit("⚠️ Dosyada çevrilecek metin bulunamadı.")
-                             # Başarısız olsa bile BepInEx'e düşmeyelim, kullanıcı özellikle bu dosyayı seçti.
-                             self.finished.emit(False, "Metin bulunamadı")
-                             return
+                             self.log_updated.emit("⚠️ Metin bulunamadı veya çeviri yapılamadı.")
                     else:
                         self.log_updated.emit("❌ UnityPy modülü eksik! Sadece BepInEx kurulabilir.")
 
                 # [MODIFIED] INTEGRATED DIRECT LOGIC (No Imports) - REV 2 (Admin/Perm Check)
-                if self.loader_type == "melonloader":
+                if self.loader_type == "melon":
                     try:
                         self.log_updated.emit("🚀 MelonLoader Kurulumu Başlatılıyor (Dahili Mod v2)...")
                         
@@ -847,7 +1177,7 @@ class InstallationWorker(QThread):
                             
                         self.log_updated.emit(f"Arşiv Çıkarılıyor: {os.path.basename(melon_zip)}")
                         with zipfile.ZipFile(melon_zip, 'r') as z:
-                            z.extractall(game_dir_str)
+                            safe_extract_zip(z, game_dir_str)
                         
                         # Doğrulama: version.dll geldi mi?
                         if not (game_dir / "version.dll").exists():
@@ -885,21 +1215,51 @@ class InstallationWorker(QThread):
                         if xunity_zip and os.path.exists(xunity_zip):
                             self.log_updated.emit(f"Çeviri Aracı Çıkarılıyor: {os.path.basename(xunity_zip)}")
                             with zipfile.ZipFile(xunity_zip, 'r') as z:
-                                z.extractall(game_dir_str)
+                                safe_extract_zip(z, game_dir_str)
                             self.log_updated.emit("✅ XUnity dosyaları çıkarıldı.")
                             
                             # 3. CONFIGURATION (Direct Write)
-                            at_dir = game_dir / "AutoTranslator"
+                            # [FIX] MelonLoader ayarları UserData klasöründe olmalı
+                            at_dir = game_dir / "UserData"
                             at_dir.mkdir(parents=True, exist_ok=True)
-                            config_file = at_dir / "Config.ini"
+                            config_file = at_dir / "AutoTranslatorConfig.ini"
+                            
+                            # [FIX] Servis ve API Key yapılandırması
+                            endpoint = "GoogleTranslateV2"
+                            extra_section = ""
+                            
+                            if self.service == "deepl":
+                                if self.api_key and len(self.api_key.strip()) > 5:
+                                    endpoint = "DeepLLegitimate"
+                                    is_free = "True" if self.api_key.strip().endswith(":fx") else "False"
+                                    extra_section = f"\n[DeepLLegitimate]\nApiKey={self.api_key.strip()}\nFree={is_free}\n"
+                                else:
+                                    endpoint = "DeepLTranslate"
+                                    extra_section = "\n[DeepLTranslate]\nMinDelay=1.5\n"
+                            elif self.service == "gemini":
+                                endpoint = "CustomTranslate"
+                                extra_section = f"\n[GeminiTranslate]\nApiKey={self.api_key.strip()}\n\n[Custom]\nUrl=http://127.0.0.1:5001/translate\n"
+                                # Köprüyü başlat/güncelle
+                                if hasattr(self, 'main_window'):
+                                    QTimer.singleShot(0, lambda: self.main_window.ensure_gemini_bridge(self.api_key.strip(), self.target_lang))
+                            elif self.service == "local_ai":
+                                endpoint = "GoogleTranslateV2" # Fallback
+                                self.log_updated.emit("ℹ️ Yerel AI şimdilik sadece 'Tam Çeviri' modunda çalışır. Loader için Google aktif edildi.")
                             
                             cfg_content = f"""[Service]
-Endpoint={self.service if self.service != "google" else "GoogleTranslateV2"}
+Endpoint={endpoint}
 FallbackEndpoint=
 
 [General]
 Language={self.target_lang}
 FromLanguage=en
+
+[Files]
+Directory=Translation\\{{Lang}}\\Text
+OutputFile=Translation\\{{Lang}}\\Text\\_AutoGeneratedTranslations.txt
+SubstitutionFile=Translation\\{{Lang}}\\Text\\_Substitutions.txt
+PreprocessorsFile=Translation\\{{Lang}}\\Text\\_Preprocessors.txt
+PostprocessorsFile=Translation\\{{Lang}}\\Text\\_Postprocessors.txt
 
 [Behaviour]
 MaxTranslationsBeforeShutdown=4000
@@ -909,16 +1269,42 @@ Delay=0
 KerbalSpaceProgram=False
 ForceUIResizing=True
 WhitespaceRemovalStrategy=TrimPerlineInToken
+OverrideFont=Segoe UI
+FallbackFont=Segoe UI
 
 [TextFrameworks]
 EnableUGUI=True
 EnableTextMeshPro=True
 EnableNGUI=True
 EnableTextMesh=True
+{extra_section}
 """
+                            # Dosyayı yaz (UserData)
                             with open(config_file, 'w', encoding='utf-8') as f:
                                 f.write(cfg_content)
+                            
+                            # Yedek olarak AutoTranslator/Config.ini'ye de yaz
+                            config_file_alt = game_dir / "AutoTranslator" / "Config.ini"
+                            try:
+                                (game_dir / "AutoTranslator").mkdir(exist_ok=True)
+                                with open(config_file_alt, 'w', encoding='utf-8') as f:
+                                    f.write(cfg_content)
+                            except: pass
                             self.log_updated.emit("✅ Konfigürasyon dosyası oluşturuldu.")
+                            
+                            # [YENİ] MelonLoader için de filtreleri zorla uygula
+                            try:
+                                self.log_updated.emit("Akıllı filtre (Mek-Mak) uygulanıyor...")
+                                TranslatorManager.apply_local_filter(
+                                    game_path=Path(self.file_path).parent,
+                                    progress_callback=self.log_updated.emit,
+                                    loader_type=self.loader_type,
+                                    fix_grammar=(self.target_lang == "tr"),
+                                    target_lang=self.target_lang,
+                                    source_lang=self.source_lang
+                                )
+                            except Exception as e:
+                                print(f"Melon Filter Error: {e}")
                             
                         else:
                             self.log_updated.emit("⚠️ Çeviri aracı (XUnity) seçilmedi veya bulunamadı, sadece Loader kuruldu.")
@@ -948,18 +1334,21 @@ EnableTextMesh=True
                     target_bepinex_zip=self.target_bepinex_zip,
                     target_translator_zip=self.target_translator_zip,
                     loader_type=self.loader_type,
-                    target_lang=self.target_lang
+                    target_lang=self.target_lang,
+                    target_injector_zip=self.target_injector_zip,
+                    source_lang=self.source_lang
                 )
                 
                 if success:
                     try:
                         self.log_updated.emit("Akıllı filtre (Regex) uygulanıyor...")
                         TranslatorManager.apply_local_filter(
-                            Path(self.file_path).parent,
+                            game_path=Path(self.file_path).parent,
                             progress_callback=self.log_updated.emit,
                             loader_type=self.loader_type,
                             fix_grammar=(self.target_lang == "tr"),
-                            target_lang=self.target_lang
+                            target_lang=self.target_lang,
+                            source_lang=self.source_lang
                         )
                     except Exception as e:
                         print(f"Filter Error: {e}")
@@ -1150,23 +1539,38 @@ class FreeGameCard(QFrame):
         
         layout.addStretch()
         
+        # Buttons Layout
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(8)
+        
         # Get Button
         get_btn = QPushButton("🎁 HEMEN AL")
         get_btn.setStyleSheet("""
             QPushButton {
-                background-color: #6c8eff;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 6px;
-                font-weight: bold;
+                background-color: #2d3748;
+                color: white; border: 1px solid #3d4758;
+                padding: 10px; border-radius: 8px; font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #5a7de8;
-            }
+            QPushButton:hover { background-color: #3d4758; }
         """)
         get_btn.clicked.connect(self.open_giveaway)
-        layout.addWidget(get_btn)
+        btn_layout.addWidget(get_btn)
+
+        # Install Button (Only for Steam)
+        if 'steam' in platforms.lower():
+            install_btn = QPushButton("🚀 İNDİR")
+            install_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #6c8eff;
+                    color: white; border: none;
+                    padding: 10px; border-radius: 8px; font-weight: bold;
+                }
+                QPushButton:hover { background-color: #5a7de8; }
+            """)
+            install_btn.clicked.connect(self.open_install_link)
+            btn_layout.addWidget(install_btn)
+            
+        layout.addLayout(btn_layout)
         
         self.setLayout(layout)
         
@@ -1191,76 +1595,31 @@ class FreeGameCard(QFrame):
             import webbrowser
             webbrowser.open(url)
             
+    def open_install_link(self):
+        """Steam linkinden AppID ayıkla ve install protokolünü başlat"""
+        url = self.data.get('open_giveaway_url', '')
+        if not url: return
+        
+        import re
+        import webbrowser
+        # Steam appid ayıklama: /app/(\d+)/
+        match = re.search(r'/app/(\d+)', url)
+        if match:
+            appid = match.group(1)
+            webbrowser.open(f"steam://install/{appid}")
+        else:
+            # ID bulunamadıysa normal sayfayı aç
+            webbrowser.open(url)
+            
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.open_giveaway()
         super().mousePressEvent(event)
 
 
-class SteamGameCard(QFrame):
-    """Steam Next Fest için özelleştirilmiş oyun kartı"""
-    def __init__(self, data, parent=None):
-        super().__init__(parent)
-        self.data = data
-        self.setFixedWidth(230)
-        self.setFixedHeight(180)
-        self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet("""
-            QFrame {
-                background-color: #1a1f2e;
-                border-radius: 8px;
-                border: 1px solid #2d3748;
-            }
-            QFrame:hover {
-                background-color: #252d3a;
-                border: 1px solid #6c8eff;
-            }
-        """)
-        
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(1, 1, 1, 8) # 1px pay bırakarak border'ın üstüne binmeyi engelle
-        layout.setSpacing(5)
-        
-        # Image
-        self.img_label = QLabel()
-        self.img_label.setFixedHeight(108) # Genişlik esnek bırakıldı (layout yönetecek)
-        self.img_label.setStyleSheet("background-color: #0f1419; border-top-left-radius: 7px; border-top-right-radius: 7px;")
-        self.img_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.img_label)
-        
-        # Title
-        title = data.get('title', 'Unknown Game')
-        self.title_lbl = QLabel(title)
-        self.title_lbl.setStyleSheet("color: white; font-weight: bold; font-size: 12px; padding: 0 8px;")
-        self.title_lbl.setWordWrap(True)
-        self.title_lbl.setMaximumHeight(40)
-        layout.addWidget(self.title_lbl)
-        
-        layout.addStretch()
-        
-        tag_lbl = QLabel("🔥 POPÜLER DEMO")
-        tag_lbl.setStyleSheet("color: #f59e0b; font-size: 10px; font-weight: bold; padding: 0 8px;")
-        layout.addWidget(tag_lbl)
-        
-        self.load_image()
 
-    def load_image(self):
-        url = self.data.get('img')
-        if not url: return
-        self.img_th = FreeImageLoader(url)
-        self.img_th.loaded.connect(self.set_pixmap)
-        self.img_th.start()
-        
-    def set_pixmap(self, pixmap):
-        scaled = pixmap.scaled(230, 108, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        self.img_label.setPixmap(scaled)
-        
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            import webbrowser
-            url = self.data.get('link')
-            if url: webbrowser.open(url)
-        super().mousePressEvent(event)
+
+
 
 
 class FreeImageLoader(QThread):
@@ -1482,41 +1841,8 @@ class GameToolItem(QPushButton):
             }
         """)
 
-class ContentDownloader(QThread):
-    progress = pyqtSignal(int)
-
-    finished = pyqtSignal(str) # başarı mesajı, hata ise "ERROR:..."
-    
-    def __init__(self, url, extract_to):
-        super().__init__()
-        self.url = url
-        self.extract_to = extract_to
-        
-    def run(self):
-        try:
-            # Geçici dosya yolu
-            zip_path = self.extract_to / "temp_download.zip"
-            self.extract_to.mkdir(parents=True, exist_ok=True)
-            
-            # İndirme
-            def report(blocknum, blocksize, totalsize):
-                percent = int(blocknum * blocksize * 100 / totalsize)
-                self.progress.emit(percent)
-                
-            urllib.request.urlretrieve(self.url, zip_path, report)
-            
-            # Çıkarma
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(self.extract_to)
-                
-            # Temizlik
-            os.remove(zip_path)
-            self.finished.emit("İşlem Başarıyla Tamamlandı!")
-            
-        except Exception as e:
-            if Path(zip_path).exists():
-                os.remove(zip_path)
-            self.finished.emit(f"ERROR: {str(e)}")
+# NOT: ContentDownloader sınıfı aşağıda tek bir yerde tanımlıdır (Google Drive
+# destekli sürüm). Buradaki eski mükerrer kopya kaldırıldı.
 
 class UpdateChecker(QThread):
     finished = pyqtSignal(list)
@@ -1549,7 +1875,7 @@ class UpdateChecker(QThread):
             
             # Gerçek URL'den veriyi çek
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            response = urllib.request.urlopen(req)
+            response = urllib.request.urlopen(req, timeout=30)
             content = response.read().decode('utf-8')
             
             # Veri yoksa veya boşsa
@@ -1570,11 +1896,12 @@ class FixWorker(QThread):
     progress_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool)
     
-    def __init__(self, game_path, api_key, manual_file_path=None):
+    def __init__(self, game_path, api_key, manual_file_path=None, service="gemini"):
         super().__init__()
         self.game_path = game_path
         self.api_key = api_key
         self.manual_file_path = manual_file_path
+        self.service = service
         
     def run(self):
         try:
@@ -1584,7 +1911,8 @@ class FixWorker(QThread):
                     self.game_path, 
                     self.api_key, 
                     progress_callback=self.emit_progress,
-                    manual_file_path=self.manual_file_path
+                    manual_file_path=self.manual_file_path,
+                    service=self.service
                 )
                 self.finished_signal.emit(success)
             else:
@@ -1718,10 +2046,10 @@ class ContentDownloader(QThread):
                     # Yeni oyun ise direkt ana dizine çıkar (zip içinde klasör olduğu varsayılır veya direkt dosya)
                     # Ancak kullanıcı "yeni klasörü ... game klasörüne çıkaracak" dedi.
                     # Zip'in içeriğini extract_to (yani game/) içine çıkarıyoruz.
-                    zip_ref.extractall(self.extract_to)
+                    safe_extract_zip(zip_ref, self.extract_to)
                 else:
                     # Güncelleme ise target klasörün içine (örn: game/wwm/new/)
-                    zip_ref.extractall(self.extract_to)
+                    safe_extract_zip(zip_ref, self.extract_to)
                 
             # Temizlik
             if zip_path.exists():
@@ -1763,20 +2091,12 @@ class PuzzleSolverWorker(QThread):
         self.game_name = game_name
         self.puzzle_desc = puzzle_desc
         self.preferred_model = preferred_model
-        # Gömülü API Key (Base64) - Ayarlarda yoksa kullanılır
-        self.gemini_key_enc = "QUl6YVN5QU10QXB5eExRYWg3NWxhX1R3NnBxVEMzM3YzSGlJSDZV"
         
     def run(self):
         try:
             import google.generativeai as genai
-            import base64
-            
             # 1. API Anahtarını Hazırla
             actual_key = self.api_key
-            if not actual_key or len(actual_key) < 10:
-                try:
-                    actual_key = base64.b64decode(self.gemini_key_enc).decode('utf-8')
-                except: pass
             
             if not actual_key:
                 self.error.emit("API Anahtarı bulunamadı! Ayarlardan Gemini Key giriniz.")
@@ -1850,112 +2170,19 @@ Not: Eğer kesin çözüm bulamazsan uydurma, "Bu bölümle ilgili kayıtlarımd
                         last_err = str(e)
                         continue
             if not success:
-               self.error.emit(f"MemoFast bağlantı kuramadı. Hata: {last_err}")
+               # Daha kullanıcı dostu hata mesajları
+               if "API_KEY_INVALID" in last_err or "400" in last_err:
+                   msg = "Geçersiz Gemini API Anahtarı! Lütfen Ayarlar sayfasından API anahtarınızı kontrol edin veya yenileyin.\n\nNot: API anahtarınız yoksa Google AI Studio (https://aistudio.google.com/app/apikey) üzerinden ücretsiz alabilirsiniz."
+               elif "quota" in last_err.lower() or "429" in last_err:
+                   msg = "Gemini kullanım limitiniz doldu. Lütfen bir süre bekleyin veya farklı bir API anahtarı kullanın."
+               else:
+                   msg = f"MemoFast bağlantı kuramadı. Hata: {last_err}"
+               self.error.emit(msg)
             
             return
             
         except Exception as e:
             self.error.emit(f"Sistem Hatası: {str(e)}")
-
-class FeedbackModeratorWorker(QThread):
-    finished = pyqtSignal(bool, str) # (Uygun mu?, Mesaj/Hata)
-    error = pyqtSignal(str)
-    
-    def __init__(self, api_key, message, preferred_model=None):
-        super().__init__()
-        self.api_key = api_key
-        self.message = message
-        self.preferred_model = preferred_model
-        self.gemini_key_enc = "QUl6YVN5QU10QXB5eExRYWg3NWxhX1R3NnBxVEMzM3YzSGlJSDZV"
-        
-    def run(self):
-        try:
-            import google.generativeai as genai
-            import base64
-            
-            actual_key = self.api_key
-            if not actual_key or len(actual_key) < 10:
-                try: actual_key = base64.b64decode(self.gemini_key_enc).decode('utf-8')
-                except: pass
-            
-            if not actual_key:
-                self.error.emit("Gemini API Key bulunamadı.")
-                return
-
-            genai.configure(api_key=actual_key)
-            
-            prompt = f"""Sen MEMOFAST yazılımı için profesyonel bir içerik denetçisisin (Moderator).
-Görevin, aşağıdaki geri bildirim mesajını incelemek ve topluluk kurallarına uygunluğunu denetlemektir.
-
-DENETLENECEK MESAJ:
-"{self.message}"
-
-KURALLAR:
-1. Küfür, hakaret, argo veya aşağılayıcı ifadeler yasaktır.
-2. Şiddet teşviki, dalga geçme, alay etme veya provokatif içerik yasaktır.
-3. Mesaj tamamen 'Temiz' ve 'Saygılı' ise onay ver.
-
-CEVAP FORMATI (Sadece tek kelime):
-- Eğer uygunsa sadece: OK
-- Eğer uygun değilse sadece: REJECT
-
-Not: Başka hiçbir açıklama yazma, sadece OK veya REJECT yaz."""
-
-            # Güvenli model denemesi
-            model_name = self.preferred_model if self.preferred_model else 'models/gemini-1.5-flash'
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                
-                if response and response.text:
-                    res = response.text.strip().upper()
-                    if "OK" in res:
-                        self.finished.emit(True, "Onaylandı")
-                    else:
-                        self.finished.emit(False, "Mesajınız uygunsuz içerik (küfür, hakaret vb.) barındırdığı için engellendi.")
-                else:
-                    self.finished.emit(True, "Yedek Onay") # AI cevap vermezse engelleme
-            except:
-                self.finished.emit(True, "Hata Onayı") # Bağlantı hatasında engelleme yapma
-
-        except Exception as e:
-            self.error.emit(str(e))
-
-class SteamNextFestWorker(QThread):
-    finished = pyqtSignal(list)
-    error = pyqtSignal(str)
-    
-    def run(self):
-        try:
-            import urllib.request
-            import re
-            # Steam Search: Daha fazla oyun çek (12 adet)
-            url = "https://store.steampowered.com/search/results/?term=Next+Fest&genre=713&count=12"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=15) as response:
-                html = response.read().decode('utf-8', errors='ignore')
-                
-                # HTML Parse (RegEx) - Uygulama Linki, ID ve Başlık
-                items = re.findall(r'<a.*?href=\"(https://store\.steampowered\.com/app/(\d+)/.*?)\".*?title\">(.*?)</span>', html, re.DOTALL)
-                
-                results = []
-                seen_ids = set()
-                for link, appid, title in items:
-                    if appid in seen_ids: continue
-                    seen_ids.add(appid)
-                    # Resim URL'sini appid'den oluştur (her zaman doğru eşleşir)
-                    img = f"https://cdn.akamai.steamstatic.com/steam/apps/{appid}/header.jpg"
-                    results.append({
-                        'title': title.strip(),
-                        'appid': appid,
-                        'link': link,
-                        'img': img
-                    })
-                self.finished.emit(results)
-        except Exception as e:
-            self.error.emit(str(e))
-
 
 class FreeGamesWorker(QThread):
     finished = pyqtSignal(list)
@@ -2062,6 +2289,447 @@ class NavButton(QPushButton):
                 main_win.play_menu_sound()
         except: pass
 
+class PrivacyConsentDialog(QDialog):
+    """Kullanıcıya hangi verilerin toplandığını açıklayan ve onay alan pencere"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("MemoFast - Gizlilik ve Veri Kullanım Onayı")
+        self.setFixedSize(500, 420)
+        self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
+        self.setStyleSheet("""
+            QDialog { background-color: #0f172a; border: 1px solid #1e293b; border-radius: 12px; }
+            QLabel { color: #e2e8f0; font-family: 'Segoe UI', sans-serif; }
+            QPushButton { 
+                padding: 12px 24px; 
+                border-radius: 8px; 
+                font-weight: bold; 
+                font-size: 13px;
+                border: none;
+            }
+            #acceptBtn { background-color: #10b981; color: white; }
+            #acceptBtn:hover { background-color: #059669; }
+            #rejectBtn { background-color: #334155; color: #94a3b8; }
+            #rejectBtn:hover { background-color: #1e293b; color: white; }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(35, 35, 35, 35)
+        layout.setSpacing(20)
+
+        title = QLabel("🚀 Topluluk Veri Paylaşımı")
+        title.setStyleSheet("font-size: 24px; font-weight: 800; color: #f8fafc;")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "MemoFast, topluluk istatistiklerini oluşturmak ve size daha iyi hizmet "
+            "vermek için bazı verileri <b>anonim</b> olarak toplar. Bu veriler şunlardır:<br><br>"
+            "• <b>Benzersiz Kullanıcı Kimliği:</b> Size özel ama anonim bir kod.<br>"
+            "• <b>Oyun Adı:</b> Hangi oyuna yama yapıldığı (Örn: Elden Ring).<br>"
+            "• <b>Oyun Motoru:</b> Oyunun teknik altyapısı (Unreal, Unity vb.).<br>"
+            "• <b>İşlem Türü:</b> Yapılan işlem (Çeviri, Kurulum vb.).<br><br>"
+            "Bu veriler <u>hiçbir şekilde</u> şahsi bilgilerinizi içermez ve "
+            "sadece topluluk sayacını beslemek için kullanılır."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("line-height: 140%; color: #94a3b8;")
+        layout.addWidget(desc)
+
+        layout.addStretch()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(15)
+        
+        self.reject_btn = QPushButton("Kabul Etmiyorum")
+        self.reject_btn.setCursor(Qt.PointingHandCursor)
+        self.reject_btn.setObjectName("rejectBtn")
+        self.reject_btn.clicked.connect(self.reject)
+        
+        self.accept_btn = QPushButton("Kabul Ediyorum")
+        self.accept_btn.setCursor(Qt.PointingHandCursor)
+        self.accept_btn.setObjectName("acceptBtn")
+        self.accept_btn.clicked.connect(self.accept)
+        
+        btn_layout.addWidget(self.reject_btn)
+        btn_layout.addWidget(self.accept_btn)
+        layout.addLayout(btn_layout)
+
+class APITestWorker(QThread):
+    """API anahtarlarını test etmek için arka plan işçisi"""
+    finished = pyqtSignal(bool, str)
+    
+    def __init__(self, service, api_key):
+        super().__init__()
+        self.service = service
+        self.api_key = api_key
+        
+    def run(self):
+        try:
+            import requests
+            if self.service == "gemini":
+                # Gemini API Key Test (v1beta endpoint)
+                url = f"https://generativelanguage.googleapis.com/v1beta/models?key={self.api_key}"
+                res = requests.get(url, timeout=10)
+                if res.status_code == 200:
+                    self.finished.emit(True, "✅ Gemini API Bağlantısı Başarılı!")
+                else:
+                    self.finished.emit(False, f"❌ Gemini Bağlantı Hatası ({res.status_code}):\n{res.text[:200]}")
+            
+            elif self.service == "deepl":
+                url = "https://api-free.deepl.com/v2/usage" if self.api_key.endswith(":fx") else "https://api.deepl.com/v2/usage"
+                headers = {"Authorization": f"DeepL-Auth-Key {self.api_key}"}
+                res = requests.get(url, headers=headers, timeout=10)
+                if res.status_code == 200:
+                    self.finished.emit(True, "✅ DeepL API Bağlantısı Başarılı!")
+                else:
+                    self.finished.emit(False, f"❌ DeepL Bağlantı Hatası ({res.status_code}):\n{res.text[:200]}")
+            else:
+                self.finished.emit(False, "Bilinmeyen servis testi.")
+                    
+        except Exception as e:
+            import traceback
+            error_msg = f"❌ İstek hatası: {str(e)}"
+            print(f"APITestWorker Error: {traceback.format_exc()}")
+            self.finished.emit(False, error_msg)
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import urllib.parse
+
+class GeminiBridgeHandler(BaseHTTPRequestHandler):
+    translator = None
+    
+    def log_message(self, format, *args):
+        # Konsol kirliliğini önlemek için logları sustur
+        pass
+
+    def do_POST(self):
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
+            params = urllib.parse.parse_qs(post_data)
+            
+            # XUnity farklı parametre isimleri kullanabilir (text, q, s)
+            text = params.get('text', params.get('q', params.get('s', [''])))[0]
+            
+            if not text:
+                try:
+                    import json
+                    data = json.loads(post_data)
+                    text = data.get('text', data.get('q', ''))
+                except: pass
+
+            if not text:
+                self.send_response(400)
+                self.end_headers()
+                return
+            
+            print(f"📥 Bridge Gelen Metin: {text[:50]}...")
+            translated = GeminiBridgeHandler.translator.translate(text)
+            
+            if not translated:
+                translated = text
+                
+            print(f"📤 Bridge Çeviri Hazır: {translated[:50]}...")
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(translated.encode('utf-8'))
+        except Exception as e:
+            print(f"❌ Gemini Bridge POST Error: {e}")
+            try:
+                self.send_response(200)
+                self.end_headers()
+                if 'text' in locals(): self.wfile.write(text.encode('utf-8'))
+            except: pass
+
+    def do_GET(self):
+        try:
+            parsed_path = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed_path.query)
+            text = params.get('text', params.get('q', params.get('s', [''])))[0]
+            
+            if not text:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"Gemini Bridge Active")
+                return
+            
+            print(f"📥 Bridge Gelen (GET): {text[:50]}...")
+            translated = GeminiBridgeHandler.translator.translate(text)
+            
+            if not translated:
+                translated = text
+            
+            print(f"📤 Bridge Çeviri (GET): {translated[:50]}...")
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(translated.encode('utf-8'))
+        except Exception as e:
+            print(f"❌ Gemini Bridge GET Error: {e}")
+            try:
+                self.send_response(200)
+                self.end_headers()
+                if 'text' in locals(): self.wfile.write(text.encode('utf-8'))
+            except: pass
+
+class GeminiBridge(QThread):
+    def __init__(self, api_key, target_lang="tr", model="gemini-2.5-flash"):
+        super().__init__()
+        self.api_key = api_key
+        self.target_lang = target_lang
+        self.model = model
+        self.server = None
+        
+    def run(self):
+        try:
+            from unreal_manager import GeminiTranslator
+            GeminiBridgeHandler.translator = GeminiTranslator(self.api_key, self.target_lang, self.model)
+            self.server = ThreadingHTTPServer(('127.0.0.1', 5001), GeminiBridgeHandler)
+            self.server.serve_forever()
+        except Exception as e:
+            print(f"Gemini Bridge Run Error: {e}")
+        
+    def stop(self):
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
+
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import threading
+
+class AssistantHTTPRequestHandler(BaseHTTPRequestHandler):
+    state_callback = None
+    command_callback = None
+    
+    def log_message(self, format, *args):
+        pass
+        
+    def do_POST(self):
+        try:
+            if self.path == "/state":
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
+                state = data.get("state", "IDLE")
+                
+                if AssistantHTTPRequestHandler.state_callback:
+                    AssistantHTTPRequestHandler.state_callback(state)
+                    
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+                return
+            elif self.path == "/agent":
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                args = json.loads(post_data.decode('utf-8'))
+                
+                if AssistantHTTPRequestHandler.command_callback:
+                    response_dict = {}
+                    event = threading.Event()
+                    AssistantHTTPRequestHandler.command_callback(args, response_dict, event)
+                    
+                    # Wait for the main thread response with a 4.0s timeout
+                    if event.wait(timeout=4.0):
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps(response_dict, ensure_ascii=False).encode('utf-8'))
+                        return
+                    else:
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write('{"status":"error","message":"Ana arayüz yanıt vermedi (Timeout)"}'.encode('utf-8'))
+                        return
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write('{"status":"error","message":"Komut işleyici tanımlı değil"}'.encode('utf-8'))
+                    return
+        except Exception as e:
+            print(f"[HTTP Server Error] {e}")
+            
+        self.send_response(400)
+        self.end_headers()
+
+class AssistantStateServer(QThread):
+    state_received = pyqtSignal(str)
+    command_received = pyqtSignal(dict, dict, object)
+    
+    def __init__(self, port=5003):
+        super().__init__()
+        self.port = port
+        self.server = None
+        AssistantHTTPRequestHandler.state_callback = self.state_received.emit
+        AssistantHTTPRequestHandler.command_callback = self.command_received.emit
+        
+    def run(self):
+        try:
+            self.server = ThreadingHTTPServer(('127.0.0.1', self.port), AssistantHTTPRequestHandler)
+            print(f"[AssistantStateServer] Listening on port {self.port}...")
+            self.server.serve_forever()
+        except Exception as e:
+            print(f"[AssistantStateServer Error] Failed to start server: {e}")
+            
+    def stop(self):
+        if self.server:
+            self.server.shutdown()
+            self.server.server_close()
+            print("[AssistantStateServer] Stopped.")
+
+
+class ArcReactorWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        # Sadece görsel bir durum göstergesi — fare tıklamaları altındaki
+        # butonlara geçsin (aksi halde 180x180'lik alan butonları engelliyordu).
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
+        self.setFixedSize(180, 180)
+        
+        self.state = "INITIALISING"
+        self.speaking = False
+        self.muted = False
+        
+        self._tick = 0
+        self._rot1 = 0.0
+        self._rot2 = 0.0
+        self._pulse = 1.0
+        self._pulse_dir = 1
+        
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._step)
+        self._timer.start(16)
+        
+    def set_state(self, state: str):
+        self.state = state
+        self.speaking = (state == "SPEAKING")
+        self.muted = (state == "MUTED")
+        self.update()
+        
+    def _step(self):
+        self._tick += 1
+        
+        if self.speaking:
+            r1_speed = 3.5
+            r2_speed = -5.0
+            pulse_speed = 0.08
+            pulse_min, pulse_max = 0.85, 1.15
+        elif self.state == "THINKING":
+            r1_speed = 2.0
+            r2_speed = -2.0
+            pulse_speed = 0.04
+            pulse_min, pulse_max = 0.93, 1.07
+        elif self.muted:
+            r1_speed = 0.2
+            r2_speed = -0.2
+            pulse_speed = 0.01
+            pulse_min, pulse_max = 0.98, 1.02
+        else:
+            r1_speed = 0.8
+            r2_speed = -1.2
+            pulse_speed = 0.02
+            pulse_min, pulse_max = 0.90, 1.10
+            
+        self._rot1 = (self._rot1 + r1_speed) % 360
+        self._rot2 = (self._rot2 + r2_speed) % 360
+        
+        self._pulse += pulse_speed * self._pulse_dir
+        if self._pulse >= pulse_max:
+            self._pulse = pulse_max
+            self._pulse_dir = -1
+        elif self._pulse <= pulse_min:
+            self._pulse = pulse_min
+            self._pulse_dir = 1
+            
+        self.update()
+        
+    def paintEvent(self, event):
+        try:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.fillRect(self.rect(), QColor(0, 0, 0, 0))
+            
+            W, H = self.width(), self.height()
+            cx, cy = W / 2, H / 2
+            
+            if self.muted:
+                base_color = QColor("#ff2244")
+                glow_color = QColor(255, 34, 68, 40)
+            elif self.speaking:
+                base_color = QColor("#00ffcc")
+                glow_color = QColor(0, 255, 204, 60)
+            elif self.state == "THINKING":
+                base_color = QColor("#ffaa00")
+                glow_color = QColor(255, 170, 0, 50)
+            else:
+                base_color = QColor("#00d4ff")
+                glow_color = QColor(0, 212, 255, 45)
+                
+            r_glow = 70 * self._pulse
+            grad = QRadialGradient(cx, cy, r_glow)
+            grad.setColorAt(0, glow_color)
+            grad.setColorAt(0.6, QColor(glow_color.red(), glow_color.green(), glow_color.blue(), 15))
+            grad.setColorAt(1, QColor(0, 0, 0, 0))
+            p.setBrush(QBrush(grad))
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(QRectF(cx - r_glow, cy - r_glow, r_glow * 2, r_glow * 2))
+            
+            p.setPen(QPen(QColor(base_color.red(), base_color.green(), base_color.blue(), 80), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QRectF(cx - 55, cy - 55, 110, 110))
+            
+            p.save()
+            p.translate(cx, cy)
+            p.rotate(self._rot1)
+            import math
+            for i in range(10):
+                p.rotate(36)
+                p.setPen(QPen(QColor("#1a0f00" if not self.muted else "#1a0000"), 3, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(QPointF(0, -48), QPointF(0, -38))
+                
+                coil_opacity = int(180 + 75 * math.sin(self._tick * 0.1 + i))
+                coil_color = QColor(base_color.red(), base_color.green(), base_color.blue(), max(50, min(255, coil_opacity)))
+                p.setPen(QPen(coil_color, 1.5))
+                p.drawLine(QPointF(-2, -46), QPointF(2, -46))
+                p.drawLine(QPointF(-2, -43), QPointF(2, -43))
+                p.drawLine(QPointF(-2, -40), QPointF(2, -40))
+            p.restore()
+            
+            p.save()
+            p.translate(cx, cy)
+            p.rotate(self._rot2)
+            p.setPen(QPen(QColor(base_color.red(), base_color.green(), base_color.blue(), 120), 1.5, Qt.DashLine))
+            p.drawEllipse(QRectF(-32, -32, 64, 64))
+            p.restore()
+            
+            r_core = 20 * (self._pulse if self.speaking else 1.0)
+            grad_core = QRadialGradient(cx, cy, r_core)
+            grad_core.setColorAt(0, QColor("#ffffff"))
+            grad_core.setColorAt(0.3, base_color)
+            grad_core.setColorAt(1, QColor(base_color.red(), base_color.green(), base_color.blue(), 0))
+            p.setBrush(QBrush(grad_core))
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(QRectF(cx - r_core, cy - r_core, r_core * 2, r_core * 2))
+            
+            p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+            p.drawArc(QRectF(cx - 50, cy - 50, 100, 100), 45 * 16, 90 * 16)
+            p.drawArc(QRectF(cx - 48, cy - 48, 96, 96), -135 * 16, 45 * 16)
+            
+            p.end()
+        except Exception as e:
+            print(f"[ArcReactor ERROR] paint failed: {e}")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2111,8 +2779,8 @@ class MainWindow(QMainWindow):
         self.create_library_page()      # 0
         self.pages_created[0] = True
         
-        # Placeholder'lar (0-12 arası toplam 13 sayfa)
-        for i in range(1, 13):
+        # Placeholder'lar (0-13 arası toplam 14 sayfa)
+        for i in range(1, 14):
             placeholder = QWidget()
             placeholder.setStyleSheet("background-color: #0f1419;")
             self.stack.addWidget(placeholder)
@@ -2126,11 +2794,16 @@ class MainWindow(QMainWindow):
         if sound_path.exists():
             self.menu_sound_player.setMedia(QMediaContent(QUrl.fromLocalFile(str(sound_path))))
         
-        self.setStyleSheet("QMainWindow { background-color: #0f1419; }")
+        self.setStyleSheet(DARK_THEME_STYLESHEET)
         
         # Tam ekran başlat
         self.showMaximized()
-        
+
+        # [YENİ] Telemetri ve Gizlilik Onayı Kontrolü
+        if "telemetry_consent" not in self.settings:
+            # Ana pencere açıldıktan 2 saniye sonra nazikçe sor
+            QTimer.singleShot(2500, self.ask_telemetry_consent)
+
         # Ayarları uygula
         self.apply_stored_settings()
         
@@ -2168,6 +2841,27 @@ class MainWindow(QMainWindow):
 
         # Sistem Tepsisi
         self.setup_system_tray()
+
+        # Gemini Bridge referansı
+        self.gemini_bridge = None
+        if self.settings.get("translator_service") == "gemini":
+            key = self.settings.get("gemini_api_key", "")
+            model = self.settings.get("preferred_gemini_model", "gemini-2.5-flash")
+            if key:
+                self.ensure_gemini_bridge(key, model=model)
+
+        # [TOPLULUK] Kullanıcıyı Havuza Kaydet (Eğer ID yoksa oluştur ve gönder)
+        import uuid
+        if "unique_client_id" not in self.settings:
+            self.settings["unique_client_id"] = str(uuid.uuid4())
+            self.save_settings()
+        
+        # Kullanıcı kaydını arka planda gönder
+        QTimer.singleShot(3000, lambda: self.send_community_data(
+            self.settings.get("unique_client_id"), 
+            islem_turu="Kullanıcı Kaydı"
+        ))
+
         # Uygulama açılışında topluluk verisini arka planda çek (game_table ikonları için)
         QTimer.singleShot(2000, self.fetch_community_stats)
         
@@ -2175,7 +2869,339 @@ class MainWindow(QMainWindow):
         if getattr(self, 'settings', {}).get("tray_shortcut", False):
             QTimer.singleShot(1000, lambda: self._toggle_tray_shortcut(Qt.Checked))
 
+        # --- MEMOFAST ARK REAKTÖRÜ & ASİSTAN DURUM SUNUCUSU ---
+        try:
+            self._reactor_widget = ArcReactorWidget(self)
+            self._reactor_widget.show()
+            self._reactor_widget.raise_()
+            
+            self._reactor_state_server = AssistantStateServer()
+            self._reactor_state_server.state_received.connect(self._reactor_widget.set_state)
+            self._reactor_state_server.command_received.connect(self._handle_agent_command)
+            self._reactor_state_server.start()
+            print("AssistantStateServer (5003) ve ArcReactorWidget başarıyla başlatıldı.")
+        except Exception as e:
+            print(f"Ark Reaktörü Başlatma Hatası: {e}")
 
+        # --- SESLİ ASİSTAN PROCESS'İNİ OTOMATİK BAŞLAT ---
+        self._agent_process = None
+        try:
+            agent_dir = BASE_PATH / "agent"
+            venv_python = agent_dir / ".venv" / "Scripts" / "python.exe"
+            agent_main = agent_dir / "main.py"
+            
+            if venv_python.exists() and agent_main.exists():
+                log_dir = BASE_PATH / ".logs"
+                log_dir.mkdir(exist_ok=True)
+                agent_log = log_dir / "agent.log"
+                
+                import subprocess as _sp
+                self._agent_log_file = open(str(agent_log), "w", encoding="utf-8")
+                self._agent_process = _sp.Popen(
+                    [str(venv_python), str(agent_main), "--headless"],
+                    cwd=str(agent_dir),
+                    stdout=self._agent_log_file,
+                    stderr=self._agent_log_file,
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW
+                )
+                print(f"Sesli asistan başlatıldı (PID: {self._agent_process.pid})")
+            else:
+                print(f"Sesli asistan başlatılamadı: venv={venv_python.exists()}, main={agent_main.exists()}")
+        except Exception as e:
+            print(f"Sesli Asistan Başlatma Hatası: {e}")
+
+    def check_local_ai_model(self):
+        """Yerel AI modeli var mı kontrol et, yoksa indir"""
+        model_name = "Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+        model_path = Config.BASE_PATH / "gemma" / "models" / model_name
+        
+        if not model_path.exists():
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Yerel AI Gerekli")
+            msg.setIcon(QMessageBox.Question)
+            msg.setText("Yerel AI (Llama-3.1) model dosyası bulunamadı.\n\n"
+                        "Bu model yaklaşık 4.9 GB boyutundadır ve bilgisayarınızda "
+                        "internetsiz, yüksek kaliteli çeviri yapmanıza olanak tanır.\n\n"
+                        "Şimdi indirmek ister misiniz?")
+            
+            btn_yes = msg.addButton("Evet, İndir", QMessageBox.YesRole)
+            btn_no = msg.addButton("Hayır, Daha Sonra", QMessageBox.NoRole)
+            msg.setDefaultButton(btn_yes)
+            msg.exec_()
+            
+            if msg.clickedButton() == btn_yes:
+                url = "https://huggingface.co/lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+                dl_dialog = AIDownloadDialog(self)
+                dl_dialog.start_download(url, model_path)
+                
+                if dl_dialog.exec_() == QDialog.Accepted:
+                    # Başarılı indirme sonrası yeniden başlat
+                    self.restart_application()
+                else:
+                    # İptal edilirse servisi Google'a çek
+                    self.trans_service_combo.setCurrentIndex(0)
+            else:
+                # Hayır denirse servisi Google'a çek
+                self.trans_service_combo.setCurrentIndex(0)
+
+    def restart_application(self):
+        """Uygulamayı yeniden başlatır"""
+        try:
+            python = sys.executable
+            script = os.path.abspath(__file__)
+            
+            import subprocess
+            subprocess.Popen([python, script], shell=False)
+            
+            QApplication.quit()
+            sys.exit(0)
+        except Exception as e:
+            print(f"Yeniden başlatma hatası: {e}")
+            QApplication.quit()
+
+    def fetch_community_stats(self):
+        """Topluluk istatistiklerini çek ve GUI'ye yansıt"""
+        def _fetch():
+            try:
+                url = "https://script.google.com/macros/s/AKfycbx7fF8jXk7Zq_k_Sj8yR4_W_Y6_g_A_H_A/exec"
+                res = requests.get(url, timeout=10)
+                if res.status_code == 200:
+                    data = res.json()
+                    # GUI güncellemesini ana thread'de yap
+                    QTimer.singleShot(0, lambda: self._update_community_ui(data))
+            except Exception as e:
+                print(f"Fetch community stats error: {e}")
+
+        import threading
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _update_community_ui(self, data):
+        """Çekilen verileri tablolara ve kartlara bas"""
+        if not data: return
+        
+        # Toplam oyuncu sayısını güncelle
+        if hasattr(self, 'users_val_lbl'):
+            self.users_val_lbl.setText(str(data.get("total_users", "...")))
+        
+        # Çevrilen oyun sayısını güncelle
+        if hasattr(self, 'trans_val_lbl'):
+            self.trans_val_lbl.setText(str(data.get("total_games", "...")))
+
+        # Tabloyu güncelle
+        if hasattr(self, 'community_games_table'):
+            games = data.get("games", [])
+            self.community_games_table.setRowCount(0)
+            for g in games:
+                row = self.community_games_table.rowCount()
+                self.community_games_table.insertRow(row)
+                self.community_games_table.setItem(row, 0, QTableWidgetItem(g.get("name", "")))
+                self.community_games_table.setItem(row, 1, QTableWidgetItem(g.get("engine", "")))
+                self.community_games_table.setItem(row, 2, QTableWidgetItem(g.get("user", "Anonim")))
+                self.community_games_table.setItem(row, 3, QTableWidgetItem(f"%{g.get('success', 100)}"))
+
+    def ensure_gemini_bridge(self, api_key, target_lang="tr", model="gemini-2.5-flash"):
+        """Gemini köprüsünün çalıştığından emin ol"""
+        if self.gemini_bridge and self.gemini_bridge.isRunning():
+            # Eğer anahtar, dil veya model değiştiyse yeniden başlat
+            if self.gemini_bridge.api_key != api_key or self.gemini_bridge.target_lang != target_lang or self.gemini_bridge.model != model:
+                self.gemini_bridge.stop()
+                self.gemini_bridge.wait()
+            else:
+                return
+        
+        self.gemini_bridge = GeminiBridge(api_key, target_lang, model)
+        self.gemini_bridge.start()
+        print(f"Gemini Bridge started (Port 5001, Lang: {target_lang}, Model: {model})")
+
+    def create_rpg_maker_page(self):
+        # Ana Sayfa Widget'ı (Karanlık Arka Plan İçin)
+        page_widget = QWidget()
+        page_widget.setObjectName("rpgMakerPage")
+        page_widget.setStyleSheet("#rpgMakerPage { background-color: #0f1419; }")
+        
+        layout = QVBoxLayout(page_widget)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.setSpacing(25)
+
+        # Header Bölümü
+        header_layout = QVBoxLayout()
+        header = QLabel("🐉 RPG Maker Otomatik Çeviri")
+        header.setStyleSheet("color: #6c8eff; font-size: 34px; font-weight: 800; background: transparent; letter-spacing: 1px;")
+        header_layout.addWidget(header)
+
+        desc = QLabel("RPG Maker MV, MZ ve tüm modlu motor varyasyonları için tam uyumlu Türkçe yama aracı.\n"
+                     "Tüm veri dosyalarını (JSON/YAML) otomatik tarar ve yerelleştirme sürecini saniyeler içinde tamamlar.")
+        desc.setStyleSheet("color: #94a3b8; font-size: 15px; background: transparent; line-height: 1.6;")
+        desc.setWordWrap(True)
+        header_layout.addWidget(desc)
+        layout.addLayout(header_layout)
+
+        # Ana Kontrol Paneli (Modern Koyu Kart)
+        panel = QFrame()
+        panel.setObjectName("rpgPanel")
+        panel.setStyleSheet("""
+            #rpgPanel { 
+                background-color: #1a1f2e; 
+                border-radius: 20px; 
+                border: 1px solid #2d3748;
+            }
+        """)
+        p_layout = QVBoxLayout(panel)
+        p_layout.setContentsMargins(35, 35, 35, 35)
+        p_layout.setSpacing(25)
+
+        # Oyun Seçim Alanı
+        sel_container = QWidget()
+        sel_layout = QHBoxLayout(sel_container)
+        sel_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.rpg_game_path = QLineEdit()
+        self.rpg_game_path.setPlaceholderText("Oyun klasörünü veya Game.exe dosyasını seçin...")
+        self.rpg_game_path.setStyleSheet("""
+            QLineEdit {
+                background-color: #0f172a;
+                color: #e2e8f0;
+                padding: 14px;
+                border: 1px solid #334155;
+                border-radius: 10px;
+                font-size: 14px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #3b82f6;
+            }
+        """)
+        
+        btn_sel = QPushButton("📂 Oyun Seç")
+        btn_sel.setFixedSize(140, 48)
+        btn_sel.setCursor(Qt.PointingHandCursor)
+        btn_sel.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6;
+                color: white;
+                font-weight: 700;
+                font-size: 14px;
+                border: none;
+                border-radius: 10px;
+            }
+            QPushButton:hover {
+                background-color: #2563eb;
+                transform: scale(1.02);
+            }
+        """)
+        btn_sel.clicked.connect(self.select_rpg_game)
+        
+        sel_layout.addWidget(self.rpg_game_path)
+        sel_layout.addWidget(btn_sel)
+        p_layout.addWidget(sel_container)
+
+        # Motor Bilgisi Kartı
+        self.rpg_engine_status = QLabel("ℹ️ Henüz bir oyun seçilmedi.")
+        self.rpg_engine_status.setStyleSheet("""
+            QLabel {
+                color: #94a3b8;
+                background-color: #111827;
+                padding: 12px 20px;
+                border-radius: 8px;
+                font-size: 13px;
+                font-family: 'Segoe UI Semibold';
+                border: 1px solid #1f2937;
+            }
+        """)
+        p_layout.addWidget(self.rpg_engine_status)
+
+        # Çeviri Başlat Butonu
+        self.btn_rpg_start = QPushButton("🚀 ÇEVİRİYİ BAŞLAT")
+        self.btn_rpg_start.setFixedHeight(60)
+        self.btn_rpg_start.setCursor(Qt.PointingHandCursor)
+        self.btn_rpg_start.setStyleSheet("""
+            QPushButton { 
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #2563eb); 
+                color: white; 
+                font-size: 18px; 
+                font-weight: 800; 
+                border: none; 
+                border-radius: 12px;
+                letter-spacing: 1px;
+            }
+            QPushButton:hover { 
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #1d4ed8); 
+            }
+            QPushButton:disabled { 
+                background: #334155; 
+                color: #64748b; 
+            }
+        """)
+        self.btn_rpg_start.clicked.connect(self.start_rpg_translation)
+        p_layout.addWidget(self.btn_rpg_start)
+
+        # Canlı Log Alanı
+        log_label = QLabel("📊 İşlem Kayıtları")
+        log_label.setStyleSheet("color: #64748b; font-size: 11px; font-weight: bold; text-transform: uppercase;")
+        p_layout.addWidget(log_label)
+
+        self.rpg_log = QTextEdit()
+        self.rpg_log.setReadOnly(True)
+        self.rpg_log.setStyleSheet("""
+            QTextEdit {
+                background-color: #0b0f1a;
+                color: #10b981;
+                font-family: 'Consolas', 'Courier New';
+                font-size: 13px;
+                border: 1px solid #1e293b;
+                border-radius: 12px;
+                padding: 15px;
+                line-height: 1.5;
+            }
+        """)
+        self.rpg_log.setPlaceholderText("İlerleme durumu burada loglanacak...")
+        p_layout.addWidget(self.rpg_log)
+
+        layout.addWidget(panel)
+        layout.addStretch()
+
+        self.stack.addWidget(page_widget)
+
+    def select_rpg_game(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Oyun EXE'si Seç", "", "Executable (*.exe);;All Files (*)")
+        if path:
+            self.rpg_game_path.setText(path)
+            engine = RPGMakerManager.detect_engine(path) if RPGMakerManager else None
+            if engine:
+                self.rpg_engine_status.setText(f"✅ Motor Tespit Edildi: RPG Maker {engine}")
+                self.rpg_engine_status.setStyleSheet("color: #10b981; font-weight: bold;")
+            else:
+                self.rpg_engine_status.setText("⚠️ Geçerli bir RPG Maker yapısı bulunamadı (JSON dosyaları aranacak).")
+                self.rpg_engine_status.setStyleSheet("color: #facc15; font-weight: bold;")
+
+    def start_rpg_translation(self):
+        path = self.rpg_game_path.text()
+        if not path:
+            QMessageBox.warning(self, "Hata", "Lütfen önce bir oyun seçin.")
+            return
+        
+        self.rpg_log.clear()
+        self.rpg_log.append("🚀 İşlem başlatılıyor...")
+        self.btn_rpg_start.setEnabled(False)
+        
+        # Hedef dil seçimini ayarlar sayfasından veya varsayılan tr alalım
+        target_lang = "tr"
+        if hasattr(self, 'combo_target_lang'):
+            code = self.combo_target_lang.currentData()
+            if code: target_lang = code
+        
+        self.rpg_worker = RPGWorker(path, target_lang=target_lang)
+        self.rpg_worker.log_updated.connect(lambda m: [self.rpg_log.append(f"👉 {m}"), self.rpg_log.verticalScrollBar().setValue(self.rpg_log.verticalScrollBar().maximum())])
+        self.rpg_worker.finished.connect(self.on_rpg_finished)
+        self.rpg_worker.start()
+
+    def on_rpg_finished(self, success, msg):
+        self.btn_rpg_start.setEnabled(True)
+        if success:
+            self.rpg_log.append(f"\n✅ BAŞARILI: {msg}")
+            QMessageBox.information(self, "Başarılı", msg)
+        else:
+            self.rpg_log.append(f"\n❌ HATA: {msg}")
+            QMessageBox.critical(self, "Hata", f"İşlem başarısız:\n{msg}")
     def _toggle_tray_shortcut(self, state):
         """tray_agent.py'yi başlat ya da durdur ve Windows başlangıcına ekle/kaldır"""
         visible = (state == Qt.Checked)
@@ -2272,6 +3298,29 @@ class MainWindow(QMainWindow):
         Bu fonksiyon Main Thread'de çalışır (GUI güvenli).
         """
         try:
+            # [YENİ] Klasörü otomatik aç (Kullanıcı İsteği)
+            try:
+                import subprocess
+                folder_to_open = os.path.abspath(os.path.dirname(file_path))
+                print(f"DEBUG: Klasör açma isteği - {folder_to_open}")
+                
+                if os.path.exists(folder_to_open):
+                    logger.info(f"Klasör açılıyor: {folder_to_open}")
+                    # Çoklu yöntemle deneme:
+                    try:
+                        os.startfile(folder_to_open)
+                    except:
+                        try:
+                            QDesktopServices.openUrl(QUrl.fromLocalFile(folder_to_open))
+                        except:
+                            subprocess.Popen(['explorer', folder_to_open])
+                else:
+                    print(f"DEBUG: Klasör bulunamadı! {folder_to_open}")
+                    logger.warning(f"Klasör bulunamadı: {folder_to_open}")
+            except Exception as e_open:
+                print(f"DEBUG: Klasör açma hatası: {e_open}")
+                logger.error(f"Klasör açma hatası: {e_open}")
+
             # 1. Dialogu import et (lazy import)
             from gui.dialogs import ManualReviewDialog
             
@@ -2325,8 +3374,16 @@ class MainWindow(QMainWindow):
             print(f"Kısayol güncelleme hatası: {e}")
 
     def get_update_state(self):
-        """Yama takip dosyasını oku (NewYama/installed_yamas.json)"""
-        path = BASE_PATH / "NewYama" / "installed_yamas.json"
+        """Yama takip dosyasını oku (AppData/installed_yamas.json)"""
+        path = USER_DATA_PATH / "installed_yamas.json"
+        
+        # Migrasyon: Eğer eski yerdeyse (BASE_PATH) yeni yere taşı
+        old_path = BASE_PATH / "NewYama" / "installed_yamas.json"
+        if not path.exists() and old_path.exists():
+            try:
+                shutil.copy2(old_path, path)
+            except: pass
+
         if not path.exists():
             return {"installed": [], "notified": []}
         try:
@@ -2358,10 +3415,8 @@ class MainWindow(QMainWindow):
         return False
 
     def save_update_state(self, state):
-        """Yama takip dosyasını kaydet"""
-        new_yama_dir = BASE_PATH / "NewYama"
-        new_yama_dir.mkdir(exist_ok=True)
-        path = new_yama_dir / "installed_yamas.json"
+        """Yama takip dosyasını AppData'ya kaydet"""
+        path = USER_DATA_PATH / "installed_yamas.json"
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=4, ensure_ascii=False)
@@ -2388,6 +3443,20 @@ class MainWindow(QMainWindow):
             else:
                 self.hud.move(self.width() - self.hud.width() - padding, self.height() - self.hud.height() - padding)
             self.hud.raise_()
+
+        # Ark Reaktörü Pozisyonu (Sağ köşede, HUD açıksa üzerinde)
+        if hasattr(self, '_reactor_widget') and self._reactor_widget:
+            padding_x = 10
+            padding_y = 10
+            rx = self.width() - self._reactor_widget.width() - padding_x
+            ry = self.height() - self._reactor_widget.height() - padding_y
+            
+            # Eğer HUD da görünür durumdaysa reaktörü dikeyde HUD'un üstüne yerleştirelim
+            if hasattr(self, 'hud') and self.hud.isVisible() and not self.hud.is_hidden:
+                ry = self.height() - self.hud.height() - 20 - self._reactor_widget.height() - 10
+            
+            self._reactor_widget.move(rx, ry)
+            self._reactor_widget.raise_()
     
     def reload_grid_layout(self):
         """Grid layout'u yeniden düzenle (resize için)"""
@@ -2399,8 +3468,18 @@ class MainWindow(QMainWindow):
 
     
     def load_settings(self):
-        """Ayarları JSON dosyasından yükle"""
-        settings_path = BASE_PATH / "settings.json"
+        """Ayarları AppData'daki JSON dosyasından yükle"""
+        settings_path = USER_DATA_PATH / "settings.json"
+        old_settings_path = BASE_PATH / "settings.json"
+        
+        # Migrasyon: Eski ayarları yeni yere taşı
+        if not settings_path.exists() and old_settings_path.exists():
+            try:
+                shutil.copy2(old_settings_path, settings_path)
+                logger.info(f"Ayarlar migrasyonu yapıldı: {settings_path}")
+            except Exception as e:
+                print(f"Ayarlar taşınamadı: {e}")
+
         defaults = {
             "version": Config.VERSION,
             "theme": Config.THEME_COLOR,
@@ -2415,18 +3494,35 @@ class MainWindow(QMainWindow):
                     stored = json.load(f)
                     defaults.update(stored)
             except Exception as e:
-                print(f"Ayarlar yüklenemedi: {e}")
-        
+                logger.error(f"Ayarlar yüklenemedi: {e}")
+
+        # API anahtarlarını çöz (eski düz metin kayıtlar olduğu gibi döner)
+        try:
+            from crypto_manager import decrypt_value, SENSITIVE_SETTINGS_KEYS
+            for _key in SENSITIVE_SETTINGS_KEYS:
+                if defaults.get(_key):
+                    defaults[_key] = decrypt_value(defaults[_key])
+        except Exception as e:
+            logger.error(f"API anahtarı çözülemedi: {e}")
+
         return defaults
 
     def save_settings(self):
-        """Ayarları JSON dosyasına kaydet"""
-        settings_path = BASE_PATH / "settings.json"
+        """Ayarları AppData'daki JSON dosyasına kaydet (API anahtarları şifreli)"""
+        settings_path = USER_DATA_PATH / "settings.json"
         try:
+            to_store = dict(self.settings)
+            try:
+                from crypto_manager import encrypt_value, SENSITIVE_SETTINGS_KEYS
+                for _key in SENSITIVE_SETTINGS_KEYS:
+                    if to_store.get(_key):
+                        to_store[_key] = encrypt_value(to_store[_key])
+            except Exception as e:
+                logger.error(f"API anahtarı şifrelenemedi: {e}")
             with open(settings_path, 'w', encoding='utf-8') as f:
-                json.dump(self.settings, f, indent=4, ensure_ascii=False)
+                json.dump(to_store, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"Ayarlar kaydedilemedi: {e}")
+            logger.error(f"Ayarlar kaydedilemedi: {e}")
 
     def apply_stored_settings(self):
         """Yüklü ayarları arayüze uygula"""
@@ -2628,7 +3724,7 @@ del "%~f0"
             si = subprocess.STARTUPINFO()
             si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             si.wShowWindow = subprocess.SW_HIDE
-            subprocess.Popen([str(cleanup_bat)], shell=True, startupinfo=si, creationflags=CREATE_NO_WINDOW)
+            subprocess.Popen(["cmd", "/c", str(cleanup_bat)], startupinfo=si, creationflags=CREATE_NO_WINDOW)
             sys.exit(0)
             
         except Exception:
@@ -2826,6 +3922,15 @@ del "%~f0"
         self.settings['enable_menu_sound'] = enabled
         self.save_settings()
 
+    def _toggle_skip_review(self, state):
+        """Unreal manuel incelemeyi atla (otomatik paketle)"""
+        enabled = (state == Qt.Checked)
+        self.settings['skip_manual_review'] = enabled
+        self.save_settings()
+        print(f"DEBUG: Otomatik Paketleme Ayarı Değişti: {enabled}")
+        logger.info(f"Otomatik Paketleme: {'Açık' if enabled else 'Kapalı'}")
+
+
     def create_nav_btn(self, text, icon, page_index):
         btn = NavButton(text, icon, page_index, self.accent_color)
         btn.clicked.connect(lambda: self.switch_page(page_index))
@@ -2844,9 +3949,9 @@ del "%~f0"
                 7: self.create_trainer_page,
                 8: self.create_puzzle_page,
                 9: self.create_ocr_page,
-                10: self.create_feedback_page,
                 11: self.create_community_page,
-                12: self.create_free_games_page
+                12: self.create_free_games_page,
+                13: self.create_rpg_maker_page
             }
             
             if index in page_creators:
@@ -2857,7 +3962,12 @@ del "%~f0"
                     page_creators[index]()
                 except Exception as e:
                     import traceback; crash_msg = traceback.format_exc()
-                    with open(r"C:\temp\memofast_crash.txt", "w", encoding="utf-8") as f: f.write(f"switch_page({index}) CRASH:\n{crash_msg}")
+                    try:
+                        crash_file = USER_DATA_PATH / ".logs" / "memofast_page_crash.txt"
+                        crash_file.parent.mkdir(parents=True, exist_ok=True)
+                        crash_file.write_text(f"switch_page({index}) CRASH:\n{crash_msg}", encoding="utf-8")
+                    except OSError:
+                        pass  # log yazılamasa da kullanıcıya hatayı gösterebilelim
                     QMessageBox.critical(self, "CRASH", f"Sayfa oluşturma hatası (index={index}):\n{e}")
                     return
                 
@@ -2934,6 +4044,7 @@ del "%~f0"
         btns_main = [
             ("Oyun Kütüphanesi", "📚", 0),
             ("Otomatik Çeviri", "🌐", 1),
+            ("RPG Maker Çeviri", "🐉", 13),
             ("Topluluk", "🌍", 11)
         ]
         for t, i, idx in btns_main:
@@ -2958,8 +4069,7 @@ del "%~f0"
         add_separator("Sistem Fakültesi")
         btns_sys = [
             ("Ücretsiz Oyunlar", "🎁", 12),
-            ("Güncelleme Merkezi", "🔃", 4),
-            ("Geri Bildirim", "📣", 10)
+            ("Güncelleme Merkezi", "🔃", 4)
         ]
         for t, i, idx in btns_sys:
             btn = self.create_nav_btn(t, i, idx)
@@ -3001,7 +4111,8 @@ del "%~f0"
         icon_path = BASE_PATH / "files" / "assets" / "tea_support.png"
         if icon_path.exists():
             tea_btn.setIcon(QIcon(str(icon_path)))
-            tea_btn.setIconSize(QSize(170, 170)) # %30 daha büyük yapıldı
+            # 170px, 800px yükseklikteki pencerede alt yazının kesilmesine yol açıyordu
+            tea_btn.setIconSize(QSize(100, 100))
         else:
             tea_btn.setText("📺 YouTube\nKatıl")
 
@@ -3241,8 +4352,11 @@ del "%~f0"
 
         
         # 5. Yedekle
-        self.tool_backup = GameToolItem("Yedekle", "Save dosyalarını buluta yedekle", "💾")
-         # self.tool_backup.clicked.connect(lambda: self.switch_page(3)) # Kaldırıldı
+        self.tool_open_folder = GameToolItem("Klasörünü Aç", "Oyunun dosya konumunu aç", "📂")
+        self.tool_open_folder.clicked.connect(self.open_game_folder)
+        self.tool_uninstall = GameToolItem("Yamayı Kaldır / Temizle", "Kurulan tüm yamaları ve araçları kaldır", "🧹")
+        self.tool_uninstall.clicked.connect(self.handle_cleanup_current_game)
+
         
         # 6. Puzzle Asistanı (Eski AI Fix)
         self.tool_ai = GameToolItem("Puzzle Asistanı", "Bölüm geçme ve puzzle çözümleri", "🧠")
@@ -3253,7 +4367,8 @@ del "%~f0"
         tools_layout.addWidget(self.tool_boost)
         tools_layout.addWidget(self.tool_cheat)
 
-        tools_layout.addWidget(self.tool_backup)
+        tools_layout.addWidget(self.tool_open_folder)
+        tools_layout.addWidget(self.tool_uninstall)
         tools_layout.addWidget(self.tool_ai)
         tools_layout.addStretch()
         
@@ -3453,9 +4568,15 @@ del "%~f0"
             if results:
                 for rg in results:
                     r_path = str(rg.get('path', '')).lower()
-                    # Eğer yeni taramada daha yüksek kaliteli veri geldiyse (exe bulunduysa vb) güncelle
-                    if r_path not in valid_games_dict or (not valid_games_dict[r_path].get('exe') and rg.get('exe')):
+                    if r_path not in valid_games_dict:
                         valid_games_dict[r_path] = rg
+                    else:
+                        # Eğer yeni taramada daha yüksek kaliteli veri geldiyse (exe bulunduysa vb) güncelle
+                        if not valid_games_dict[r_path].get('exe') and rg.get('exe'):
+                            valid_games_dict[r_path]['exe'] = rg['exe']
+                        # Yeni tarama daha iyi bir isim bulduysa (örn: WindowsNoEditor hatası düzeltildiyse) ismi güncelle
+                        if rg.get('name') and rg.get('name') != valid_games_dict[r_path].get('name'):
+                            valid_games_dict[r_path]['name'] = rg['name']
             
             merged_results = list(valid_games_dict.values())
             
@@ -3606,6 +4727,10 @@ del "%~f0"
             
             if hasattr(self, 'clean_btn'):
                 self.clean_btn.setEnabled(True)
+            if hasattr(self, 'tool_open_folder'):
+                self.tool_open_folder.setEnabled(True)
+            if hasattr(self, 'tool_uninstall'):
+                self.tool_uninstall.setEnabled(True)
             # [YENİ] AI Düzeltme Butonu
             # Eğer self.fix_ai_btn yoksa oluştur (Sonraki güncellemelerde kalıcı eklenebilir ama şu an dinamik ekleyelim)
             # Ancak layout'a erişmemiz lazım.
@@ -3617,24 +4742,36 @@ del "%~f0"
             print(f"Detay hatası: {e}")
 
     def on_fix_ai_clicked(self):
-        """AI Düzeltme İşlemini Başlat"""
-        QMessageBox.information(self, "Bilgi", "Bu özellik şu anda devre dışıdır.\nVersiyon 3 güncellemesi ile birlikte daha kararlı bir şekilde eklenecektir.")
-        return
-
-    def old_on_fix_ai_clicked(self): # Pasife alındı
+        """AI Düzeltme İşlemini Başlat (Modernize Edilmiş)"""
         if not hasattr(self, 'current_game_data') or not self.current_game_data:
             QMessageBox.warning(self, "Hata", "Oyun seçilmedi!")
             return
             
-        # API Key Kontrol
-        api_key = self.settings.get("gemini_api_key", "")
-        if not api_key:
-             QMessageBox.warning(self, "Hata", "Gemini API Anahtarı Ayarlarda Girilmemiş!")
-             return
-             
+        # Servis Seçimi
+        service = "google"
+        if hasattr(self, 'trans_service_combo'):
+            idx = self.trans_service_combo.currentIndex()
+            if idx == 1: service = "deepl"
+            elif idx == 2: service = "gemini"
+            elif idx == 3: service = "local_ai"
+        
+        # API Key Kontrol (Sadece Gemini ve DeepL için kritik)
+        api_key = ""
+        if service == "gemini":
+            api_key = self.settings.get("gemini_api_key", "")
+            if not api_key:
+                QMessageBox.warning(self, "Hata", "Gemini API Anahtarı Ayarlarda Girilmemiş!")
+                return
+        elif service == "deepl":
+            api_key = self.settings.get("deepl_api_key", "")
+            if not api_key:
+                QMessageBox.warning(self, "Hata", "DeepL API Anahtarı Ayarlarda Girilmemiş!")
+                return
+
         # Onay İste
+        service_name = "Yerel AI (Llama)" if service == "local_ai" else service.capitalize()
         reply = QMessageBox.question(self, "Onay", 
-            "Bu işlem oyunun çeviri dosyasını tarayacak ve hatalı fiilleri (Gitmek -> Git) düzeltecek.\n\n"
+            f"Bu işlem '{service_name}' kullanarak oyunun çeviri dosyasını tarayacak ve hatalı fiilleri (Gitmek -> Git) düzeltecek.\n\n"
             "Bu işlem dosya boyutuna göre birkaç dakika sürebilir.\nDevam etmek istiyor musunuz?",
             QMessageBox.Yes | QMessageBox.No)
             
@@ -3643,23 +4780,29 @@ del "%~f0"
             
         # Dialog Başlat
         self.fix_dialog = QProgressDialog("Çeviriler Analiz Ediliyor...", "İptal", 0, 0, self)
-        self.fix_dialog.setWindowTitle("AI Çeviri Düzeltme")
+        self.fix_dialog.setWindowTitle(f"AI Çeviri Düzeltme ({service_name})")
         self.fix_dialog.setMinimumDuration(0)
         self.fix_dialog.setWindowModality(Qt.WindowModal)
         self.fix_dialog.resize(400, 100)
         self.fix_dialog.show()
         
         # Worker Başlat
-        game_path = self.current_game_data.get('exe', self.current_game_data.get('path')) # Exe path lazım
+        game_path = self.current_game_data.get('exe', self.current_game_data.get('path')) 
         if os.path.isfile(game_path):
              game_dir = os.path.dirname(game_path)
         else:
              game_dir = game_path
              
-        self.fix_worker = FixWorker(game_dir, api_key)
+        self.fix_worker = FixWorker(game_dir, api_key, service=service)
         self.fix_worker.progress_signal.connect(lambda msg: self.fix_dialog.setLabelText(msg))
         self.fix_worker.finished_signal.connect(self.on_fix_finished)
         self.fix_worker.start()
+
+    def dummy_fix_ai(self): # Silinecek veya eski logic'i bypass etmek için
+        pass
+
+    def old_on_fix_ai_clicked(self): # Pasife alındı (Yedek)
+        pass
         
     def on_fix_finished(self, success):
         self.fix_dialog.cancel()
@@ -3679,15 +4822,22 @@ del "%~f0"
                     
                 if file_path:
                     # Yeniden Başlat (Manuel Path ile)
-                    api_key = self.settings.get("gemini_api_key", "")
+                    # Servis Seçimi
+                    service = "google"
+                    if hasattr(self, 'trans_service_combo'):
+                        idx = self.trans_service_combo.currentIndex()
+                        if idx == 1: service = "deepl"
+                        elif idx == 2: service = "gemini"
+                        elif idx == 3: service = "local_ai"
+
+                    if service == "gemini": api_key = self.settings.get("gemini_api_key", "")
+                    elif service == "deepl": api_key = self.settings.get("deepl_api_key", "")
+                    else: api_key = ""
+
                     game_path = self.current_game_data.get('exe', self.current_game_data.get('path'))
-                    if os.path.isfile(game_path): game_dir = os.path.dirname(game_path)
-                    else: game_dir = game_path
-                    
-                    self.fix_dialog.show()
-                    self.fix_dialog.setLabelText("Manuel dosya işleniyor...")
-                    
-                    self.fix_worker = FixWorker(game_dir, api_key, manual_file_path=file_path)
+                    game_dir = os.path.dirname(game_path) if os.path.isfile(game_path) else game_path
+
+                    self.fix_worker = FixWorker(game_dir, api_key, manual_file_path=file_path, service=service)
                     self.fix_worker.progress_signal.connect(lambda msg: self.fix_dialog.setLabelText(msg))
                     self.fix_worker.finished_signal.connect(lambda s: self.on_fix_finished_final(s))
                     self.fix_worker.start()
@@ -3765,12 +4915,6 @@ del "%~f0"
             except Exception as e:
                 print(f"Tablo güncelleme hatası: {e}")
 
-    def start_targeted_unreal_translation(self, game_path, engine, pak_path, internal_file, aes_key=None, is_encrypted_override=None):
-        """GUI'den seçilen özel PAK/Dosya ile çeviriyi başlat"""
-        self.trans_log_list.clear() # Fix: Correct widget name
-        self.trans_log_list.addItem("🚀 Hedefli Çeviri Başlatılıyor...")
-        self.trans_log_list.addItem(f"📦 PAK: {pak_path.name}")
-        if internal_file:
             self.trans_log_list.addItem(f"📄 Hedef Dosya: {internal_file}")
         
         # UI State
@@ -3790,6 +4934,9 @@ del "%~f0"
             target_internal_file_path=internal_file,
             is_encrypted_override=is_encrypted_override
         )
+        # Skip review ayarını aktar
+        self.worker.skip_manual_review = self.settings.get('skip_manual_review', False)
+
         
         # [FIX] Update worker usage of new UI elements if available
         if hasattr(self, 'trans_service_combo'):
@@ -3798,7 +4945,14 @@ del "%~f0"
              srv = "google"
              if idx == 1: srv = "deepl"
              elif idx == 2: srv = "gemini"
+             elif idx == 3: srv = "local_ai"
              self.worker.service = srv
+             
+             # [YENİ] API Key Aktarımı
+             if srv == "gemini":
+                 self.worker.api_key = self.settings.get("gemini_api_key", "")
+             elif srv == "deepl":
+                 self.worker.api_key = self.settings.get("deepl_api_key", "")
              
         if hasattr(self, 'combo_target_lang'):
              # Get selected lang code
@@ -3966,28 +5120,307 @@ del "%~f0"
             self.pak_table.selectRow(0)
 
     def on_pak_table_selected(self):
+        self._selected_content_file = None
+        self._embedded_aes_key = None
         rows = self.pak_table.selectionModel().selectedRows()
         if not rows: return
         
         row = rows[0].row()
-        if row < len(self.current_paks_data):
+        self.selected_pak_row = row # GUI odağı kaybetse bile hafızada tut
+        
+        if getattr(self, '_unity_full_trans_mode', False):
+            if row < self.pak_table.rowCount():
+                file_path = self.pak_table.item(row, 0).data(Qt.UserRole)
+                if hasattr(self, 'show_unity_pak_content'):
+                    self.show_unity_pak_content(file_path)
+            return
+            
+        if hasattr(self, 'current_paks_data') and row < len(self.current_paks_data):
             pak_info = self.current_paks_data[row]
             self.start_content_scan(pak_info)
 
+    def on_btn_analyze_pak_clicked(self):
+        """Seçili Pakı Tara butonuna tıklandığında çalışır"""
+        def log(msg):
+            if hasattr(self, 'trans_log_list'):
+                self.trans_log_list.addItem(msg)
+                self.trans_log_list.scrollToBottom()
+
+        # 1. current_paks_data var mı?
+        if not hasattr(self, 'current_paks_data') or not self.current_paks_data:
+            log("⚠️ PAK listesi henüz yüklenmedi. Önce bir Unreal oyunu seçin.")
+            return
+
+        # 2. PAK tablosunda seçili satır var mı?
+        rows = self.pak_table.selectionModel().selectedRows()
+        if not rows:
+            # Seçili yoksa ilk satırı otomatik seç
+            if self.pak_table.rowCount() > 0:
+                self.pak_table.selectRow(0)
+                rows = self.pak_table.selectionModel().selectedRows()
+            if not rows:
+                log("⚠️ Lütfen PAK listesinden bir dosya seçin.")
+                return
+
+        row = rows[0].row()
+        if row < len(self.current_paks_data):
+            pak_info = self.current_paks_data[row]
+            log(f"📂 Taranıyor: {pak_info.get('real_name', pak_info.get('path', ''))}")
+            self.start_content_scan(pak_info)
+        else:
+            log("⚠️ Seçilen PAK verisi bulunamadı.")
+
+    def on_pak_content_table_selected(self):
+        rows = self.pak_content_table.selectionModel().selectedRows()
+        if not rows: return
+        
+        row = rows[0].row()
+
+        # Unreal modu: seçili iç dosyayı sakla
+        if not getattr(self, '_unity_full_trans_mode', False):
+            item = self.pak_content_table.item(row, 0)
+            if item:
+                self._selected_content_file = item.data(Qt.UserRole)
+                # Çeviri butonunu aktif et
+                if hasattr(self, 'install_btn'):
+                    self.install_btn.setEnabled(True)
+        if getattr(self, '_unity_full_trans_mode', False):
+            import sys
+            import os
+            import json
+            import UnityPy
+            
+            path_id_str = self.pak_content_table.item(row, 0).data(Qt.UserRole)
+            if not path_id_str or path_id_str in ["Bilinmiyor", "Yok"]:
+                if hasattr(self, 'unity_text_preview'): self.unity_text_preview.setPlainText("Geçerli bir nesne seçilmedi.")
+                return
+                
+            assets_path = getattr(self, 'current_unity_assets_path', None)
+            if not assets_path or not os.path.exists(assets_path):
+                if hasattr(self, 'unity_text_preview'): self.unity_text_preview.setPlainText("Assets dosyası bulunamadı.")
+                return
+                
+            try:
+                env = UnityPy.load(assets_path)
+                for obj in env.objects:
+                    if str(obj.path_id) == path_id_str:
+                        type_str = str(getattr(obj, 'type', ''))
+                        if hasattr(obj.type, 'name'):
+                            type_str = obj.type.name
+                        elif type_str.startswith('ClassIDType.'):
+                            type_str = type_str.split('.')[-1]
+                            
+                        if type_str == "MonoBehaviour":
+                            try:
+                                tree = obj.read_typetree()
+                                if tree:
+                                    if hasattr(self, 'unity_text_preview'): self.unity_text_preview.setPlainText(json.dumps(tree, indent=4, ensure_ascii=False))
+                                    return
+                            except: pass
+                            
+                        if type_str == "Font":
+                            try:
+                                tree = obj.read_typetree()
+                                if tree:
+                                    display_tree = dict(tree)
+                                    if "m_FontData" in display_tree:
+                                        display_tree["m_FontData"] = f"[{len(display_tree['m_FontData'])} bytes]"
+                                    text = "[Yazı Tipi Nesnesi Bilgileri]\n\n" + json.dumps(display_tree, indent=4, ensure_ascii=False)
+                                    if hasattr(self, 'unity_text_preview'): self.unity_text_preview.setPlainText(text)
+                                    return
+                            except: pass
+                            
+                        sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unity'))
+                        from asset_viewer import clean_text_strings, hex_dump, unpack_dat
+                        
+                        try:
+                            raw_data = obj.get_raw_data()
+                            if b"I2Languages" in raw_data:
+                                i2_tree = unpack_dat(raw_data)
+                                text = "[Binary I2Languages Nesnesi]\n\n" + json.dumps(i2_tree, indent=4, ensure_ascii=False)
+                                if hasattr(self, 'unity_text_preview'): self.unity_text_preview.setPlainText(text)
+                                return
+                        except: pass
+                        
+                        try:
+                            data = obj.read()
+                            if hasattr(data, 'script'):
+                                if isinstance(data.script, str): text = data.script
+                                else: text = bytes(data.script).decode('utf-8', errors='replace')
+                            elif hasattr(data, 'text') and isinstance(data.text, str):
+                                text = data.text
+                            else:
+                                raw_data = obj.get_raw_data() if hasattr(obj, 'get_raw_data') else None
+                                if raw_data:
+                                    printable_chars = sum(1 for b in raw_data if 32 <= b < 127 or b in [10, 13, 9])
+                                    ratio = printable_chars / len(raw_data) if len(raw_data) > 0 else 0
+                                    if ratio > 0.3:
+                                        text = clean_text_strings(raw_data)
+                                    else:
+                                        text = f"[Okunamayan Obje Verisi ({type_str}) - Hex Görünümü]\n\n" + hex_dump(raw_data)
+                                else:
+                                    text = "Bu veri metin olarak okunamadı."
+                        except Exception as e:
+                            try:
+                                raw_data = obj.get_raw_data() if hasattr(obj, 'get_raw_data') else None
+                                if raw_data:
+                                    printable_chars = sum(1 for b in raw_data if 32 <= b < 127 or b in [10, 13, 9])
+                                    ratio = printable_chars / len(raw_data) if len(raw_data) > 0 else 0
+                                    text = f"[Hata ile Okundu: {str(e)}]\n\n"
+                                    if ratio > 0.3:
+                                        text += "Ham Veri (Temizlenmiş Metin Görünümü):\n\n" + clean_text_strings(raw_data)
+                                    else:
+                                        text += "Ham Veri (Hex Görünümü):\n\n" + hex_dump(raw_data)
+                                else:
+                                    text = f"Okuma Hatası: {str(e)}"
+                            except Exception as e2:
+                                text = f"Okuma Hatası: {str(e)}\nHam veri de okunamadı: {str(e2)}"
+                                
+                        if hasattr(self, 'unity_text_preview'): self.unity_text_preview.setPlainText(text)
+                        return
+                        
+                if hasattr(self, 'unity_text_preview'): self.unity_text_preview.setPlainText("Nesne dosyada bulunamadı.")
+            except Exception as e:
+                if hasattr(self, 'unity_text_preview'): self.unity_text_preview.setPlainText(f"Hata: {str(e)}")
+            return
+            
+        # Normal Unreal Engine mantığı
+        if rows:
+            data = self.pak_content_table.item(row, 0).data(Qt.UserRole)
+            if data:
+                self.selected_internal_file = data.replace("\\", "/")
+
     def start_content_scan(self, pak_info):
         self.pak_content_table.setRowCount(0)
-        
-        # AES Key Check (Basit)
+
+        # AES Key kontrolü: Şifreli pak ise kullanıcıdan key iste
         key = None
-        # if pak_info['encrypted']: ... (Key sorma işi sonra)
-        
+        if pak_info.get('encrypted', False):
+            game_name = ""
+            if hasattr(self, 'current_game_data') and self.current_game_data:
+                game_name = self.current_game_data.get('name', '')
+            if not game_name:
+                try:
+                    from pathlib import Path
+                    game_name = Path(pak_info['path']).stem
+                except:
+                    game_name = "Oyun"
+
+            try:
+                from gui.dialogs import AESKeyDialog
+                dlg = AESKeyDialog(game_name, self)
+                if dlg.exec_() == dlg.Accepted:
+                    entered = dlg.get_key().strip()
+                    if entered:
+                        key = entered
+                        if hasattr(self, 'trans_log_list'):
+                            self.trans_log_list.addItem(f"🔑 AES Key alındı, PAK taranıyor...")
+                            self.trans_log_list.scrollToBottom()
+                    else:
+                        if hasattr(self, 'trans_log_list'):
+                            self.trans_log_list.addItem("⚠️ AES Key girilmedi, şifreli içerik görüntülenemeyebilir.")
+                            self.trans_log_list.scrollToBottom()
+                else:
+                    if hasattr(self, 'trans_log_list'):
+                        self.trans_log_list.addItem("⚠️ AES Key girişi iptal edildi.")
+                        self.trans_log_list.scrollToBottom()
+                    return  # İptal edilirse tarama yapma
+            except Exception as e:
+                print(f"AES Key Dialog Error: {e}")
+
+        if hasattr(self, 'btn_analyze_pak'):
+            self.btn_analyze_pak.setEnabled(False)
+            self.btn_analyze_pak.setText("⏳ Taranıyor...")
+
+        # Key ve pak yolunu sakla (çeviri ve retry için)
+        self._last_content_scan_pak_path = pak_info['path']
+        self._embedded_aes_key = key  # Çeviri başlatınca burada kullanılacak
+
         self.embedded_content_worker = ContentScanWorker(pak_info['path'], key)
         self.embedded_content_worker.finished.connect(self.on_content_scan_finished)
         self.embedded_content_worker.start()
 
     def on_content_scan_finished(self, files):
+        # Butonu geri etkinleştir
+        if hasattr(self, 'btn_analyze_pak'):
+            self.btn_analyze_pak.setEnabled(True)
+            self.btn_analyze_pak.setText("📂 Seçili Pak Tara")
+
+        # Hata mesajı var mı kontrol et
+        errors = [f for f in files if f.startswith("__ERROR__:")]
+        clean_files = [f for f in files if not f.startswith("__ERROR__:")]
+
+        if errors:
+            err_msg = errors[0].replace("__ERROR__:", "")
+            err_lower = err_msg.lower()
+
+            # Şifreleme hatası → AES Key sor ve yeniden dene (yalnızca 1 kez)
+            if "encrypted" in err_lower or "no key" in err_lower or "aes" in err_lower:
+
+                # Daha önce key denenmiş mi? (sonsuz döngü önleme)
+                if getattr(self, '_aes_retry_attempted', False):
+                    self._aes_retry_attempted = False  # sıfırla
+                    if hasattr(self, 'trans_log_list'):
+                        self.trans_log_list.addItem("❌ AES Key yanlış veya geçersiz. Tarama iptal edildi.")
+                        self.trans_log_list.scrollToBottom()
+                    return
+
+                if hasattr(self, 'trans_log_list'):
+                    self.trans_log_list.addItem("🔒 PAK şifreli! AES Key girmeniz gerekiyor.")
+                    self.trans_log_list.scrollToBottom()
+
+                pak_path = getattr(self, '_last_content_scan_pak_path', None)
+                if pak_path:
+                    game_name = ""
+                    if hasattr(self, 'current_game_data') and self.current_game_data:
+                        game_name = self.current_game_data.get('name', '')
+                    if not game_name:
+                        try:
+                            from pathlib import Path
+                            game_name = Path(pak_path).stem
+                        except:
+                            game_name = "Oyun"
+
+                    try:
+                        from gui.dialogs import AESKeyDialog
+                        dlg = AESKeyDialog(game_name, self)
+                        if dlg.exec_() == dlg.Accepted:
+                            entered = dlg.get_key().strip()
+                            if entered:
+                                self._aes_retry_attempted = True  # flag: 1 deneme hakkı
+                                self._embedded_aes_key = entered  # <-- EKSİK OLAN SATIR BURASIYDI!
+                                if hasattr(self, 'trans_log_list'):
+                                    self.trans_log_list.addItem(f"🔑 AES Key alındı, yeniden taranıyor...")
+                                    self.trans_log_list.scrollToBottom()
+                                if hasattr(self, 'btn_analyze_pak'):
+                                    self.btn_analyze_pak.setEnabled(False)
+                                    self.btn_analyze_pak.setText("⏳ Taranıyor...")
+                                self.embedded_content_worker = ContentScanWorker(pak_path, entered)
+                                self.embedded_content_worker.finished.connect(self.on_content_scan_finished)
+                                self.embedded_content_worker.start()
+                                return
+                    except Exception as e:
+                        print(f"AES retry dialog error: {e}")
+                return
+
+            # Diğer hatalar
+            if hasattr(self, 'trans_log_list'):
+                self.trans_log_list.addItem(f"❌ PAK tarama hatası: {err_msg}")
+                self.trans_log_list.scrollToBottom()
+            return
+
+        if not clean_files:
+            if hasattr(self, 'trans_log_list'):
+                self.trans_log_list.addItem("⚠️ PAK içinde dil dosyası bulunamadı.")
+                self.trans_log_list.scrollToBottom()
+        else:
+            self._aes_retry_attempted = False  # Başarılı, flag sıfırla
+            if hasattr(self, 'trans_log_list'):
+                self.trans_log_list.addItem(f"✅ {len(clean_files)} dosya listelendi.")
+                self.trans_log_list.scrollToBottom()
+
         # 1. Ham veriyi sakla (Yeniden filtrelemek için lazım olacak)
-        self.last_scanned_pak_files = files
+        self.last_scanned_pak_files = clean_files
         # 2. Listeyi güncelle
         self.refresh_pak_content_list()
 
@@ -4027,22 +5460,54 @@ del "%~f0"
             "/tr/": "Türkçe", "/turkish/": "Türkçe"
         }
 
-        # 3. Listeyi Hazırla
+        # 3. Dosya tipine göre filtreleme (Öncelik: locres > csv > dil klasörü)
+        LANG_EXTS = {".locres", ".csv", ".json", ".xml", ".po", ".pot"}
         display_items = []
-        
+
+        def is_engine_path(p):
+            return "engine/" in p or "plugins/" in p or "plugin/" in p
+
+        # --- PASS 1: .locres ---
+        locres_items = []
         for f in files:
             f_clean = f.strip()
-            f_lower = f_clean.lower()
-            
-            # --- ZORUNLU FİLTRELER ---
-            if not f_lower.endswith(".locres"): continue
-            if "engine/" in f_lower or "plugin" in f_lower or "plugins/" in f_lower: continue
-            
-            # --- DİL TESPİTİ ---
+            f_lower = f_clean.lower().replace("\\", "/")
+            if f_lower.endswith(".locres") and not is_engine_path(f_lower):
+                locres_items.append(f_clean)
+
+        # --- PASS 2: .csv (locres yoksa) ---
+        csv_items = []
+        if not locres_items:
+            for f in files:
+                f_clean = f.strip()
+                f_lower = f_clean.lower().replace("\\", "/")
+                if f_lower.endswith(".csv") and not is_engine_path(f_lower):
+                    csv_items.append(f_clean)
+
+        # --- PASS 3: Dil klasörlerindeki her türlü dosya (locres ve csv yoksa) ---
+        lang_folder_items = []
+        if not locres_items and not csv_items:
+            lang_keywords = ["/en/", "/english/", "/de/", "/fr/", "/es/", "/ru/",
+                             "/pt/", "/pl/", "/it/", "/tr/", "/zh/", "/ja/", "/ko/",
+                             "/localization/", "/localisation/", "/locale/", "/lang/"]
+            for f in files:
+                f_clean = f.strip()
+                f_lower = f_clean.lower().replace("\\", "/")
+                if is_engine_path(f_lower):
+                    continue
+                if any(kw in f_lower for kw in lang_keywords):
+                    lang_folder_items.append(f_clean)
+
+        active_list = locres_items or csv_items or lang_folder_items
+        file_type = "LOCRES" if locres_items else ("CSV" if csv_items else "LANG")
+
+        for f_clean in active_list:
+            f_lower = f_clean.lower().replace("\\", "/")
+
+            # Dil tespiti
             source_lang = "Bilinmiyor"
             is_english = False
             found_lang_code = False
-            
             for code, name in lang_map.items():
                 if code in f_lower:
                     source_lang = name
@@ -4181,6 +5646,7 @@ del "%~f0"
 
     def create_page_template(self, title, content_layout):
         page = QWidget()
+        page.setStyleSheet("background-color: #0f1419;")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(30, 30, 30, 30)
 
@@ -5437,7 +6903,7 @@ del "%~f0"
         
         # Dosya Seçimi
         f_row = QHBoxLayout()
-        f_row.addWidget(QLabel("Yülenecek Dosya:"))
+        f_row.addWidget(QLabel("Yüklenecek Dosya:"))
         self.yama_file_combo = QComboBox()
         self.yama_file_combo.setStyleSheet("QComboBox { background-color: #161b22; color: #e8edf2; border: 1px solid #30363d; padding: 5px; }")
         f_row.addWidget(self.yama_file_combo, 1)
@@ -5801,14 +7267,15 @@ del "%~f0"
             progress = pyqtSignal(int)
             finished = pyqtSignal(bool, str, object)  # success, message, zip_path
             
-            def __init__(self, updater, url):
+            def __init__(self, updater, url, expected_hash=None):
                 super().__init__()
                 self.updater = updater
                 self.url = url
-            
+                self.expected_hash = expected_hash
+
             def run(self):
                 try:
-                    zip_path = self.updater.download_update(self.url, self.progress.emit)
+                    zip_path = self.updater.download_update(self.url, self.progress.emit, expected_hash=self.expected_hash)
                     if zip_path:
                         self.finished.emit(True, "İndirme tamamlandı!", zip_path)
                     else:
@@ -5816,7 +7283,7 @@ del "%~f0"
                 except Exception as e:
                     self.finished.emit(False, str(e), None)
         
-        self.app_update_thread = AppUpdateThread(self.app_updater, download_url)
+        self.app_update_thread = AppUpdateThread(self.app_updater, download_url, expected_hash=app_data.get('sha256'))
         self.app_update_thread.progress.connect(self.app_update_pd.setValue)
         self.app_update_thread.finished.connect(self.on_app_update_downloaded)
         self.app_update_thread.start()
@@ -5830,14 +7297,10 @@ del "%~f0"
             QMessageBox.critical(self, "İndirme Hatası", f"Güncelleme indirilemedi:\n{message}")
             return
         
-        # Güncellemeyi uygula
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Güncelleme Hazır")
         msg_box.setIcon(QMessageBox.Question)
-        msg_box.setText("Güncelleme başarıyla indirildi!\n\n"
-                       "Şimdi güncelleme uygulanacak ve program yeniden başlatılacak.\n"
-                       "Devam edilsin mi?")
-        
+        msg_box.setText("Güncelleme başarıyla indirildi!\n\nŞimdi güncelleme uygulanacak ve program yeniden başlatılacak.\nDevam edilsin mi?")
         btn_evet = msg_box.addButton("Evet", QMessageBox.YesRole)
         btn_hayir = msg_box.addButton("Hayır", QMessageBox.NoRole)
         msg_box.setDefaultButton(btn_evet)
@@ -5910,6 +7373,8 @@ del "%~f0"
 
     def handle_patch_install(self):
         """Yama İndir ve Kur Mantığı (Refactored v2)"""
+
+
         selected_file_data = self.yama_file_combo.currentData()
         selected_game_data = self.yama_target_game_combo.currentData()
         
@@ -6059,25 +7524,50 @@ del "%~f0"
             
             import shutil
             
-            if is_zip:
-                with zipfile.ZipFile(str(source_path), 'r') as zf:
-                    for member in zf.infolist():
-                        target_file = Path(found_target_path) / member.filename
-                        
-                        # Güvenlik ve Silme
-                        if not member.is_dir():
-                            if target_file.exists():
-                                try:
-                                    target_file.unlink()
-                                except: pass
-                        
-                        zf.extract(member, str(found_target_path))
-                        if not member.is_dir():
-                             self.yama_install_log.addItem(f"📄 {member.filename} -> OK")
-                             if zf.infolist().index(member) % 10 == 0: QApplication.processEvents()
-            else:
-                shutil.copy2(str(source_path), str(found_target_path))
-                self.yama_install_log.addItem(f"📄 Dosya kopyalandı -> OK")
+            # =========================================================
+            # YÖNETİCİ İZNİ (UAC) İLE ÇIKARTMA İŞLEMİ (ELEVATED PROCESS)
+            # =========================================================
+            import tempfile
+            import sys
+            import ctypes
+            import shutil
+            
+            # Arka planda calisacak, yonetici yetkisine sahip ufak bir python betigi olusturuyoruz
+            script_path = os.path.join(tempfile.gettempdir(), "memofast_admin_extractor.py")
+            with open(script_path, "w", encoding="utf-8") as sf:
+                sf.write("import zipfile\n")
+                sf.write("import shutil\n")
+                sf.write("import os\n")
+                sf.write("from pathlib import Path\n")
+                sf.write(f"is_zip = {is_zip}\n")
+                sf.write(f"source = r'{str(source_path)}'\n")
+                sf.write(f"target = r'{str(found_target_path)}'\n")
+                sf.write("try:\n")
+                sf.write("    if is_zip:\n")
+                sf.write("        with zipfile.ZipFile(source, 'r') as zf:\n")
+                sf.write("            for member in zf.infolist():\n")
+                sf.write("                target_file = Path(target) / member.filename\n")
+                sf.write("                if not member.is_dir() and target_file.exists():\n")
+                sf.write("                    try: target_file.unlink()\n")
+                sf.write("                    except: pass\n")
+                sf.write("                zf.extract(member, target)\n")
+                sf.write("    else:\n")
+                sf.write("        shutil.copy2(source, target)\n")
+                sf.write("except Exception as e:\n")
+                sf.write("    with open(r'C:\\temp\\memofast_extract_error.txt', 'w') as err_f:\n")
+                sf.write("        err_f.write(str(e))\n")
+            
+            self.yama_install_log.addItem(f"🛡️ Yönetici onayı bekleniyor...")
+            QApplication.processEvents()
+            
+            # Bu kod Windows UAC (Yönetici) popup'ı çıkarır
+            # Kullanıcı "Evet" derse arka planda scripti yönetici olarak çalıştırır
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{script_path}"', None, 0)
+            
+            if ret <= 32:
+                raise Exception("Yönetici izni reddedildi veya başlatılamadı.")
+                
+            self.yama_install_log.addItem(f"✅ Dosyalar yönetici izniyle hedefe aktarıldı.")
 
             # Bitti
             self.yama_install_log.addItem(f"✅ İŞLEM BAŞARIYLA TAMAMLANDI")
@@ -6348,6 +7838,54 @@ exit
         sound_layout.addStretch()
         gg_layout.addLayout(sound_layout)
         
+        # [YENİ] Otomatik Paketleme (Unreal)
+        review_layout = QHBoxLayout()
+        review_lbl = QLabel("Otomatik Paketleme:")
+        review_lbl.setStyleSheet("color: #9ca3af; font-size: 13px; min-width: 120px;")
+        
+        self.skip_review_check = QCheckBox("Unreal çevirisi biter bitmez onaysız paketle")
+        self.skip_review_check.setChecked(self.settings.get('skip_manual_review', False))
+        self.skip_review_check.setStyleSheet("QCheckBox { color: #e8edf2; font-size: 13px; }")
+        self.skip_review_check.stateChanged.connect(self._toggle_skip_review)
+        
+        review_layout.addWidget(review_lbl)
+        review_layout.addWidget(self.skip_review_check)
+        review_layout.addStretch()
+        gg_layout.addLayout(review_layout)
+        
+        # Mikrofon Seçim Ayarı
+        mic_layout = QHBoxLayout()
+        mic_lbl = QLabel("Mikrofon Cihazı:")
+        mic_lbl.setStyleSheet("color: #9ca3af; font-size: 13px; min-width: 120px;")
+        
+        self.mic_combo = QComboBox()
+        self.mic_combo.setFixedSize(300, 35)
+        self.mic_combo.setCursor(Qt.PointingHandCursor)
+        self.mic_combo.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; padding: 5px; font-size: 13px; } QComboBox::drop-down { border: none; } QComboBox::down-arrow { image: none; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 5px solid #6c8eff; margin-right: 10px; }")
+        
+        self.mic_combo.addItem("Varsayılan Mikrofon", None)
+        try:
+            self.microphones_list = self.get_microphone_list()
+            for mic_idx, mic_name in self.microphones_list:
+                self.mic_combo.addItem(mic_name, mic_idx)
+        except Exception as mic_init_err:
+            print(f"Mikrofonlar listelenemedi: {mic_init_err}")
+            
+        saved_mic_idx = self.settings.get("microphone_device")
+        if saved_mic_idx is not None:
+            for idx in range(self.mic_combo.count()):
+                if self.mic_combo.itemData(idx) == saved_mic_idx:
+                    self.mic_combo.setCurrentIndex(idx)
+                    break
+                    
+        self.mic_combo.currentIndexChanged.connect(self.change_microphone)
+        
+        mic_layout.addWidget(mic_lbl)
+        mic_layout.addWidget(self.mic_combo)
+        mic_layout.addStretch()
+        gg_layout.addLayout(mic_layout)
+
+        
         gen_group.setLayout(gg_layout)
         layout.addWidget(gen_group)
         
@@ -6382,9 +7920,16 @@ exit
         # Toggle logic lambda
         self.toggle_deepl_btn.clicked.connect(lambda: self.deepl_key_input.setEchoMode(QLineEdit.Normal if self.deepl_key_input.echoMode() == QLineEdit.Password else QLineEdit.Password))
 
+        self.test_deepl_btn = QPushButton("Test")
+        self.test_deepl_btn.setFixedSize(60, 35)
+        self.test_deepl_btn.setCursor(Qt.PointingHandCursor)
+        self.test_deepl_btn.setStyleSheet("QPushButton { background-color: #10b981; color: white; border-radius: 4px; font-weight: bold; border: none; } QPushButton:hover { background-color: #059669; }")
+        self.test_deepl_btn.clicked.connect(self.test_deepl_connection)
+
         deepl_key_layout.addWidget(deepl_lbl)
         deepl_key_layout.addWidget(self.deepl_key_input)
         deepl_key_layout.addWidget(self.toggle_deepl_btn)
+        deepl_key_layout.addWidget(self.test_deepl_btn)
         deepl_key_layout.addStretch()
         
         # 2. Gemini Alanı
@@ -6411,9 +7956,16 @@ exit
         # Toggle logic lambda for Gemini
         self.toggle_gemini_btn.clicked.connect(lambda: self.gemini_key_input.setEchoMode(QLineEdit.Normal if self.gemini_key_input.echoMode() == QLineEdit.Password else QLineEdit.Password))
 
+        self.test_gemini_btn = QPushButton("Test")
+        self.test_gemini_btn.setFixedSize(60, 35)
+        self.test_gemini_btn.setCursor(Qt.PointingHandCursor)
+        self.test_gemini_btn.setStyleSheet("QPushButton { background-color: #10b981; color: white; border-radius: 4px; font-weight: bold; border: none; } QPushButton:hover { background-color: #059669; }")
+        self.test_gemini_btn.clicked.connect(self.test_gemini_connection)
+
         gemini_key_layout.addWidget(gemini_lbl)
         gemini_key_layout.addWidget(self.gemini_key_input)
         gemini_key_layout.addWidget(self.toggle_gemini_btn)
+        gemini_key_layout.addWidget(self.test_gemini_btn)
         gemini_key_layout.addStretch()
 
         trans_layout.addLayout(deepl_key_layout)
@@ -6491,16 +8043,207 @@ exit
 
         # feedback_group.setLayout(fb_layout)
         # layout.addWidget(feedback_group) # AYARLARDAN KALDIRILDI, YENİ SAYFAYA TAŞINDI
-        
+
+        # --- TOPLULUK ÇEVİRİ PAYLAŞIMI ---
+        share_group = QGroupBox("🌐 Topluluk Çeviri Paylaşımı")
+        share_group.setStyleSheet("QGroupBox { color: #e8edf2; font-size: 14px; font-weight: bold; border: 1px solid #2d3748; border-radius: 8px; margin-top: 10px; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }")
+        sh_layout = QVBoxLayout()
+        sh_layout.setContentsMargins(20, 30, 20, 20)
+
+        sh_info = QLabel(
+            "Çevirdiğiniz her satır otomatik birikir. Paketi dışa aktarıp arkadaşlarınızla paylaşabilirsiniz — "
+            "paketi içe aktaran kişi aynı metinleri internete hiç gitmeden çevirir.\n"
+            "Paketler yalnızca metin içerir ve güvenlik süzgecinden geçirilir; kod çalıştıramaz."
+        )
+        sh_info.setWordWrap(True)
+        sh_info.setStyleSheet("color: #9ca3af; font-size: 13px; font-weight: normal;")
+        sh_layout.addWidget(sh_info)
+
+        self.cache_stats_lbl = QLabel("")
+        self.cache_stats_lbl.setStyleSheet("color: #6c8eff; font-size: 13px; font-weight: bold;")
+        sh_layout.addWidget(self.cache_stats_lbl)
+        self._refresh_cache_stats()
+
+        # 2x2 grid: dar pencerelerde sağ alttaki sistem paneli (HUD) ile çakışmasın
+        sh_btn_grid = QGridLayout()
+        sh_btn_grid.setSpacing(10)
+
+        def _share_btn(text, handler, color="#1a1f2e"):
+            b = QPushButton(text)
+            b.setFixedHeight(40)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(f"QPushButton {{ background-color: {color}; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; font-weight: 500; padding: 0 14px; }} QPushButton:hover {{ background-color: #2d3748; }}")
+            b.clicked.connect(handler)
+            return b
+
+        sh_btn_grid.addWidget(_share_btn("📤 Paketi Dışa Aktar", self.export_translation_pack), 0, 0)
+        sh_btn_grid.addWidget(_share_btn("📥 Paket İçe Aktar", self.import_translation_pack), 0, 1)
+        if getattr(Config, "COMMUNITY_CACHE_URL", ""):
+            sh_btn_grid.addWidget(_share_btn("🌐 Topluluk Çevirilerini İndir", self.download_community_packs, color="#233047"), 1, 0)
+        sh_btn_grid.addWidget(_share_btn("🧹 İçe Aktarılanları Temizle", self.clear_imported_translations), 1, 1)
+        sh_btn_grid.setColumnStretch(2, 1)  # sağ tarafı boş bırak
+        sh_layout.addLayout(sh_btn_grid)
+
+        share_group.setLayout(sh_layout)
+        layout.addWidget(share_group)
+
         layout.addStretch()
-        
+
         scroll.setWidget(container)
-        
+
         # Sayfa Layout'u
         page_layout = QVBoxLayout()
         page_layout.addWidget(scroll)
-        
+
         self.stack.addWidget(self.create_page_template("Ayarlar", page_layout))
+
+    # ------------------------------------------------------------------ #
+    #  Topluluk Çeviri Paylaşımı (Kalıcı Önbellek)                        #
+    # ------------------------------------------------------------------ #
+    def _get_translation_cache(self):
+        """Seçili dil çifti için kalıcı önbelleği açar."""
+        from translation_cache import TranslationCache
+        target_lang = "tr"
+        source_lang = "en"
+        if hasattr(self, 'combo_target_lang'):
+            code = self.combo_target_lang.currentData()
+            if code: target_lang = code
+        if hasattr(self, 'combo_source_lang'):
+            code = self.combo_source_lang.currentData()
+            if code: source_lang = code
+        return TranslationCache(target_lang=target_lang, source_lang=source_lang)
+
+    def _refresh_cache_stats(self):
+        """Ayarlar sayfasındaki önbellek sayacını günceller."""
+        try:
+            cache = self._get_translation_cache()
+            own = len(cache.data)
+            imported = len(cache.imported)
+            if own or imported:
+                self.cache_stats_lbl.setText(f"💾 Birikim: {own} kendi çeviriniz + {imported} topluluk çevirisi")
+            else:
+                self.cache_stats_lbl.setText("💾 Henüz birikmiş çeviri yok — ilk oyununuzu çevirdiğinizde burada görünecek.")
+        except Exception as e:
+            logger.error(f"Önbellek istatistiği okunamadı: {e}")
+
+    def export_translation_pack(self):
+        """Önbelleği paylaşılabilir .mfcache dosyasına aktarır."""
+        try:
+            cache = self._get_translation_cache()
+            if len(cache) == 0:
+                QMessageBox.information(self, "Önbellek Boş",
+                    "Henüz paylaşacak çeviri birikmedi.\nÖnce en az bir oyun çevirin.")
+                return
+            default_name = f"MemoFast_Ceviriler_{cache.source_lang}-{cache.target_lang}.mfcache.gz"
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Çeviri Paketini Kaydet", default_name,
+                "MemoFast Çeviri Paketi (*.gz *.mfcache)")
+            if not path:
+                return
+            ok, result = cache.export_pack(path)
+            if not ok:
+                QMessageBox.warning(self, "Dışa Aktarılamadı", str(result))
+                return
+
+            # Paket hazır — kullanıcıya topluluğa gönderme seçeneği sun
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Paket Hazır! 🎉")
+            msg_box.setIcon(QMessageBox.Information)
+            msg_box.setText(
+                f"{result} çeviri paketlendi.\n\n"
+                "Paketi topluluk havuzuna göndermek ister misiniz?\n"
+                "Tarayıcıda paylaşım sayfası açılır — dosyayı sürükleyip 'Submit' demeniz yeterli. "
+                "İncelendikten sonra havuza eklenir ve herkes tek tıkla indirir.")
+            btn_send = msg_box.addButton("🌐 Topluluğa Gönder", QMessageBox.YesRole)
+            msg_box.addButton("Sadece Kaydet", QMessageBox.NoRole)
+            msg_box.exec_()
+            if msg_box.clickedButton() == btn_send:
+                import webbrowser
+                webbrowser.open(Config.COMMUNITY_CONTRIBUTE_URL)
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Dışa aktarma hatası: {e}")
+
+    def import_translation_pack(self):
+        """Paylaşılan .mfcache paketini doğrulayıp içe aktarır."""
+        try:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Çeviri Paketi Seç", "",
+                "MemoFast Çeviri Paketi (*.mfcache *.gz);;Tüm Dosyalar (*)")
+            if not path:
+                return
+
+            cache = self._get_translation_cache()
+
+            # Kullanıcıya içe aktarmadan önce bilgi ver
+            confirm = QMessageBox(self)
+            confirm.setWindowTitle("Topluluk Paketi İçe Aktarılıyor")
+            confirm.setIcon(QMessageBox.Question)
+            confirm.setText(
+                "Bu paket topluluk tarafından hazırlanmıştır; çevirilerin doğruluğunu "
+                "MemoFast garanti edemez.\n\n"
+                "✅ Paket güvenlik süzgecinden geçirilecek (yalnızca metin kabul edilir, "
+                "şüpheli linkler ayıklanır).\n"
+                "✅ Kendi çevirileriniz her zaman öncelikli kalır.\n"
+                "✅ İstediğiniz an 'İçe Aktarılanları Temizle' ile geri alabilirsiniz.\n\n"
+                "Devam edilsin mi?")
+            btn_yes = confirm.addButton("Evet, İçe Aktar", QMessageBox.YesRole)
+            confirm.addButton("Vazgeç", QMessageBox.NoRole)
+            confirm.exec_()
+            if confirm.clickedButton() != btn_yes:
+                return
+
+            ok, result = cache.import_pack(path)
+            if ok:
+                msg = f"✅ {result['added']} yeni çeviri eklendi."
+                if result['skipped']:
+                    msg += f"\n🛡️ {result['skipped']} kayıt güvenlik süzgecine takıldı ve alınmadı."
+                msg += "\n\nArtık bu metinler çeviride internete hiç gitmeden anında dolacak."
+                QMessageBox.information(self, "İçe Aktarma Tamam", msg)
+                self._refresh_cache_stats()
+            else:
+                QMessageBox.warning(self, "İçe Aktarılamadı", str(result))
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"İçe aktarma hatası: {e}")
+
+    def download_community_packs(self):
+        """Resmi topluluk havuzundan paketleri tek tıkla indirir."""
+        try:
+            cache = self._get_translation_cache()
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                ok, result = cache.fetch_community(
+                    progress_callback=lambda m: self.add_log(m) if hasattr(self, 'add_log') else None)
+            finally:
+                QApplication.restoreOverrideCursor()
+            if ok:
+                QMessageBox.information(self, "Topluluk Çevirileri İndirildi 🎉",
+                    f"✅ {result['packs']} paket indirildi, {result['added']} yeni çeviri eklendi."
+                    + (f"\n🛡️ {result['skipped']} kayıt güvenlik süzgecine takıldı." if result['skipped'] else ""))
+                self._refresh_cache_stats()
+            else:
+                QMessageBox.information(self, "Bilgi", str(result))
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"İndirme hatası: {e}")
+
+    def clear_imported_translations(self):
+        """Topluluktan içe aktarılan çevirileri siler (kendi çeviriler korunur)."""
+        try:
+            cache = self._get_translation_cache()
+            if len(cache.imported) == 0:
+                QMessageBox.information(self, "Bilgi", "İçe aktarılmış topluluk çevirisi yok.")
+                return
+            confirm = QMessageBox.question(
+                self, "Emin misiniz?",
+                f"{len(cache.imported)} topluluk çevirisi silinecek.\n"
+                "Kendi çevirileriniz korunur. Devam edilsin mi?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if confirm != QMessageBox.Yes:
+                return
+            count = cache.clear_imported()
+            QMessageBox.information(self, "Temizlendi", f"🧹 {count} topluluk çevirisi silindi.")
+            self._refresh_cache_stats()
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"Temizleme hatası: {e}")
 
     def apply_theme(self, color, save=True):
         self.accent_color = color
@@ -6510,27 +8253,40 @@ exit
             self.settings["theme"] = color
             self.save_settings()
         
-        # 1. Sidebar Butonlarını Güncelle
         style = "QPushButton { background-color: #1a1f2e; color: #9ca3af; text-align: left; padding: 16px 20px; border: none; font-size: 13px; font-weight: 500; } QPushButton:hover { background-color: #2d3748; color: #e8edf2; } QPushButton:checked { background-color: #252d3a; color: %s; border-right: 3px solid %s; font-weight: bold; }" % (color, color)
         
         for btn in self.nav_btns:
             btn.setStyleSheet(style)
             
-        # 2. Onay Mesajı - KALDIRILDI
-        # QMessageBox.information(self, "Tema Güncellendi", f"Tema rengi başarıyla değiştirildi: {color}")
-        
     def change_language(self, index):
         lang = self.lang_combo.currentText()
-        
         self.settings["language"] = lang
         self.save_settings()
-        
-        if index > 0: # Türkçe dışındakiler
-             # QMessageBox.information(self, "Dil Değişikliği", f"Dil '{lang}' olarak ayarlandı.\nDeğişikliklerin tam uygulanması için uygulamayı yeniden başlatın.")
-             pass
-        else:
-             # Türkçe seçilirse bişey demeye gerek yok (varsayılan)
-             pass
+
+    def get_microphone_list(self):
+        mics = []
+        try:
+            import subprocess
+            import json
+            agent_dir = BASE_PATH / "agent"
+            venv_python = agent_dir / ".venv" / "Scripts" / "python.exe"
+            
+            if venv_python.exists():
+                script = "import sounddevice as sd, json; print(json.dumps([(i, d['name']) for i, d in enumerate(sd.query_devices()) if d['max_input_channels'] > 0]))"
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                res = subprocess.run([str(venv_python), "-c", script], capture_output=True, text=True, startupinfo=si, creationflags=0x08000000)
+                if res.returncode == 0:
+                    mics = json.loads(res.stdout.strip())
+        except Exception as e:
+            print(f"Mikrofon listesi alınırken hata: {e}")
+        return mics
+
+    def change_microphone(self, index):
+        mic_idx = self.mic_combo.itemData(index)
+        self.settings["microphone_device"] = mic_idx
+        self.settings["microphone_device_name"] = self.mic_combo.itemText(index)
+        self.save_settings()
 
     def clear_all_cache(self):
         msg_box = QMessageBox(self)
@@ -6554,152 +8310,122 @@ exit
                 QMessageBox.critical(self, "Hata", f"Silme hatası: {str(e)}")
 
     def create_community_page(self):
-        """Topluluk Kütüphanesi Sayfası"""
+        """Topluluk Kütüphanesi Sayfası (Geliştirilmiş)"""
         layout = QVBoxLayout()
-        layout.setSpacing(10)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(15)
+        layout.setContentsMargins(5, 5, 5, 5)
         
-        # Kendimize ait, daha ufak bir baslik ekleyelim
         baslik = QLabel("🌍 Topluluk Çeviri Kütüphanesi")
-        baslik.setStyleSheet("color: white; font-size: 22px; font-weight: bold;")
-
-        # Uyarı/Açıklama
-        warning = QLabel("Bu kütüphane MemoFast topluluğunun çevirdiği oyunların canlı veritabanıdır.")
+        baslik.setStyleSheet(f"color: {self.accent_color}; font-size: 24px; font-weight: bold;")
+        warning = QLabel("Topluluk tarafından denenen ve çevirisi paylaşılan oyunların canlı veritabanı.")
         warning.setStyleSheet("color: #94a3b8; font-size: 13px; font-weight: 500;")
-        
-        # Arama Kutusu
-        self.community_search = QLineEdit()
-        self.community_search.setPlaceholderText("🔍 Oyun adı ara...")
-        self.community_search.setStyleSheet(
-            "QLineEdit { background-color: #1a1f2e; color: white; border: 1px solid #2d3748; "
-            "border-radius: 6px; padding: 5px 10px; font-size: 14px; min-width: 220px; }"
-        )
-        self.community_search.textChanged.connect(self._filter_community_table)
-        
-        header_h = QHBoxLayout()
-        header_h.addWidget(baslik)
-        header_h.addStretch()
-        header_h.addWidget(self.community_search)
-        
-        layout.addLayout(header_h)
-        layout.addWidget(warning)
-        
 
-        # --- Istatistik Paneli ---
-        stats_group = QGroupBox("Genel Istatistikler")
-        stats_group.setFixedHeight(100)
-        stats_group.setStyleSheet("QGroupBox { color: " + self.accent_color + "; font-size: 12px; font-weight: bold; border: 1px solid #2d3748; border-radius: 8px; margin-top: 5px; padding-top: 5px; background-color: #1a1f2e; }")
+        layout.addWidget(baslik)
+        layout.addWidget(warning)
+
         stats_layout = QHBoxLayout()
-        stats_layout.setContentsMargins(10, 10, 10, 10)
         stats_layout.setSpacing(15)
 
-        # Kullanıcı Sayısı Kutusu
-        users_box = QVBoxLayout()
-        self.users_val_lbl = QLabel("...")
-        self.users_val_lbl.setStyleSheet("color: #10b981; font-size: 24px; font-weight: bold;")
-        self.users_val_lbl.setAlignment(Qt.AlignCenter)
-        users_title = QLabel("Toplam Kullanıcı")
-        users_title.setStyleSheet("color: #94a3b8; font-size: 13px;")
-        users_title.setAlignment(Qt.AlignCenter)
-        users_box.addWidget(self.users_val_lbl)
-        users_box.addWidget(users_title)
+        def create_stat_card(title, color):
+            card = QFrame()
+            card.setObjectName("StatCardCard")
+            card.setStyleSheet(f"#StatCardCard {{ background-color: #1a1f2e; border-radius: 10px; border: 1px solid #2d3748; border-bottom: 3px solid {color}; }} QLabel {{ border: none; background: transparent; }}")
+            vbox = QVBoxLayout(card)
+            lbl_val = QLabel("...")
+            lbl_val.setStyleSheet(f"color: {color}; font-size: 26px; font-weight: bold;")
+            lbl_val.setAlignment(Qt.AlignCenter)
+            lbl_title = QLabel(title)
+            lbl_title.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: bold;")
+            lbl_title.setAlignment(Qt.AlignCenter)
+            vbox.addWidget(lbl_val)
+            vbox.addWidget(lbl_title)
+            return card, lbl_val
 
-        # Çevrilen Oyun Sayısı Kutusu
-        trans_box = QVBoxLayout()
-        self.trans_val_lbl = QLabel("...")
-        self.trans_val_lbl.setStyleSheet("color: #6c8eff; font-size: 24px; font-weight: bold;")
-        self.trans_val_lbl.setAlignment(Qt.AlignCenter)
-        trans_title = QLabel("Çevrilen Oyun")
-        trans_title.setStyleSheet("color: #94a3b8; font-size: 13px;")
-        trans_title.setAlignment(Qt.AlignCenter)
-        trans_box.addWidget(self.trans_val_lbl)
-        trans_box.addWidget(trans_title)
+        self.card_users, self.users_val_lbl = create_stat_card("👤 TOPLAM OYUNCU", "#6c8eff")
+        self.card_trans, self.trans_val_lbl = create_stat_card("✅ ÇEVRİLEN OYUN", "#10b981")
+        self.card_fail, self.untrans_val_lbl = create_stat_card("❌ ÇEVRİLEMEDİ", "#ef4444")
 
-        # Çevrilemeyen Oyun Sayısı Kutusu
-        untrans_box = QVBoxLayout()
-        self.untrans_val_lbl = QLabel("...")
-        self.untrans_val_lbl.setStyleSheet("color: #ef4444; font-size: 24px; font-weight: bold;")
-        self.untrans_val_lbl.setAlignment(Qt.AlignCenter)
-        untrans_title = QLabel("Çevrilemedi")
-        untrans_title.setStyleSheet("color: #94a3b8; font-size: 13px;")
-        untrans_title.setAlignment(Qt.AlignCenter)
-        untrans_box.addWidget(self.untrans_val_lbl)
-        untrans_box.addWidget(untrans_title)
+        self.donut_chart = DonutChartWidget()
+        donut_card = QFrame()
+        donut_card.setObjectName("DonutCard")
+        donut_card.setStyleSheet("#DonutCard { background-color: #1a1f2e; border-radius: 10px; border: 1px solid #2d3748; } QLabel { border: none; background: transparent; }")
+        d_layout = QHBoxLayout(donut_card)
+        d_layout.addWidget(self.donut_chart)
+        d_info = QLabel("Genel\nBaşarı\nOranı")
+        d_info.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: bold;")
+        d_layout.addWidget(d_info)
 
-        stats_layout.addLayout(users_box)
-        
-        # Araya çizgi
-        line1 = QFrame()
-        line1.setFrameShape(QFrame.VLine)
-        line1.setFrameShadow(QFrame.Sunken)
-        line1.setStyleSheet("background-color: #2d3748;")
-        stats_layout.addWidget(line1)
-        
-        stats_layout.addLayout(trans_box)
-        
-        line2 = QFrame()
-        line2.setFrameShape(QFrame.VLine)
-        line2.setFrameShadow(QFrame.Sunken)
-        line2.setStyleSheet("background-color: #2d3748;")
-        stats_layout.addWidget(line2)
-        
-        stats_layout.addLayout(untrans_box)
+        stats_layout.addWidget(self.card_users)
+        stats_layout.addWidget(self.card_trans)
+        stats_layout.addWidget(self.card_fail)
+        stats_layout.addWidget(donut_card)
+        layout.addLayout(stats_layout)
 
-        stats_group.setLayout(stats_layout)
-        layout.addWidget(stats_group)
-        # -------------------------
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(10)
 
+        self.community_search = QLineEdit()
+        self.community_search.setPlaceholderText("🔍 Oyun adı ara...")
+        if hasattr(self.community_search, "setClearButtonEnabled"):
+            self.community_search.setClearButtonEnabled(True)
+        self.community_search.setStyleSheet("QLineEdit { background-color: #1a1f2e; color: white; border: 1px solid #2d3748; border-radius: 6px; padding: 8px 15px; font-size: 14px; min-width: 250px; }")
+        filter_layout.addWidget(self.community_search)
 
+        self.filter_sort = QComboBox()
+        self.filter_sort.addItems(["En Yeniler", "En Çok Çevrilenler", "A-Z", "Z-A"])
+        self.filter_sort.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; padding: 5px; min-width: 140px; }")
+        filter_layout.addWidget(self.filter_sort)
 
-        # Eger essiz id yoksa olustur ve kaydet
-        import uuid
-        if not hasattr(self, 'settings') or 'unique_client_id' not in self.settings:
-            # varsayilan olarak settings dict'in memofast_gui icinde config veya settings ile yonetiliyor 
-            # ancak biz sadece var olup olmadigina bakacagiz, eger yoksa olusturacagiz.
-            if not getattr(self, "settings", None):
-                self.settings = {}
-            if "unique_client_id" not in self.settings:
-                client_id = str(uuid.uuid4())
-                self.settings["unique_client_id"] = client_id
-                if hasattr(self, 'save_settings'):
-                    self.save_settings()
-        
-        # Oyun Listesi Tablosu
-        list_lbl = QLabel("🎮 Oyun Veritabanı")
-        list_lbl.setStyleSheet(f"color: {self.accent_color}; font-size: 16px; font-weight: bold; margin-top: 15px;")
-        layout.addWidget(list_lbl)
-        
-        self.community_games_table = QTableWidget(0, 4)
-        self.community_games_table.setHorizontalHeaderLabels(["Oyun Adı", "Oyun Motoru", "Çeviren Kullanıcı", "Başarı Oranı"])
-        self.community_games_table.horizontalHeader().setStretchLastSection(True)
+        self.filter_engine = QComboBox()
+        self.filter_engine.addItems(["Tüm Motorlar", "Unity", "Unreal Engine", "Diğer"])
+        self.filter_engine.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; padding: 5px; min-width: 120px; }")
+        filter_layout.addWidget(self.filter_engine)
+
+        self.filter_status = QComboBox()
+        self.filter_status.addItems(["Tüm Durumlar", "✅ Çevrilenler", "❌ Uyumsuzlar"])
+        self.filter_status.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; padding: 5px; min-width: 160px; }")
+        filter_layout.addWidget(self.filter_status)
+        filter_layout.addStretch()
+        layout.addLayout(filter_layout)
+
+        self.community_search.textChanged.connect(self._apply_community_filters)
+        self.filter_sort.currentIndexChanged.connect(self._apply_community_filters)
+        self.filter_engine.currentIndexChanged.connect(self._apply_community_filters)
+        self.filter_status.currentIndexChanged.connect(self._apply_community_filters)
+
+        self.community_games_table = QTableWidget(0, 5)
+        self.community_games_table.setHorizontalHeaderLabels(["Oyun Adı", "Oyun Motoru", "Çeviren Kullanıcı", "Başarı Oranı", "EklenmeSıra"])
+        self.community_games_table.setColumnHidden(4, True) 
+        self.community_games_table.horizontalHeader().setStretchLastSection(False)
         self.community_games_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.community_games_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.community_games_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.community_games_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.community_games_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.community_games_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.community_games_table.setAlternatingRowColors(True)
         self.community_games_table.setStyleSheet("""
-            QTableWidget { background-color: #0f1419; color: #e8edf2; border: 1px solid #2d3748; border-radius: 8px; font-size: 14px; }
-            QHeaderView::section { background-color: #1a1f2e; color: #94a3b8; font-weight: bold; padding: 5px; border: 1px solid #2d3748; }
+            QTableWidget { background-color: #0f1419; alternate-background-color: #141823; color: #e8edf2; border: 1px solid #2d3748; border-radius: 8px; font-size: 14px; }
+            QHeaderView::section { background-color: #1a1f2e; color: #94a3b8; font-weight: bold; padding: 8px; border: 1px solid #2d3748; }
             QTableWidget::item { padding: 5px; border-bottom: 1px solid #1a1f2e; }
         """)
-        
-        self.community_games_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout.addWidget(self.community_games_table, stretch=1)
         
-        # Istatistikleri Google E-Tablo'dan cek ve arayuzu guncelle
+        import uuid
+        if not getattr(self, "settings", None):
+            self.settings = {}
+        if "unique_client_id" not in self.settings:
+            self.settings["unique_client_id"] = str(uuid.uuid4())
+            if hasattr(self, 'save_settings'):
+                self.save_settings()
+
         self.fetch_community_stats()
-
-
-        # create_page_template fonksiyonuna başlık yollamıyoruz (yer kaplamasın diye)
-        page_widget = self.create_page_template("", layout)
         
-        # page_widget'in icindeki QVBoxLayout'un marginini sifirlayalim ki ustten bosluk kalmasin
+        page_widget = self.create_page_template("", layout)
         if page_widget.layout() and page_widget.layout().count() > 1:
             main_content = page_widget.layout().itemAt(1).widget()
             if main_content and main_content.layout():
                 main_content.layout().setContentsMargins(10, 10, 10, 10)
-                # Eger create_page_template bos bir header uretiyorsa (Label), onu gizleyelim
                 for i in range(main_content.layout().count()):
                     widget = main_content.layout().itemAt(i).widget()
                     if isinstance(widget, QLabel) and widget.text() == "":
@@ -6707,8 +8433,27 @@ exit
                         
         self.stack.addWidget(page_widget)
 
+    def ask_telemetry_consent(self):
+        """Kullanıcıdan telemetri onayı ister."""
+        dialog = PrivacyConsentDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.settings["telemetry_consent"] = True
+            # İlk kayıt olarak "Kullanıcı Kaydı" gönder (Onay verildiği için)
+            self.send_community_data(self.settings.get("unique_client_id"), islem_turu="Kullanıcı Kaydı")
+        else:
+            self.settings["telemetry_consent"] = False
+        
+        self.save_settings()
+        logger.info(f"Telemetri tercihi kaydedildi: {self.settings['telemetry_consent']}")
+
     def send_community_data(self, client_id, oyun_adi="NONE", oyun_motoru="NONE", durum="NONE", islem_turu="Oyun Çevirisi"):
-        """Topluluk verilerini Google Form üzerinden arka planda (thread ile) gizlice veritabanına gönderir."""
+        """Topluluk verilerini Google Form üzerinden arka planda gönderir (Onaya bağlıdır)."""
+        
+        # [KRİTİK]: Onay yoksa hiçbir koşulda veri gönderme! (KVKK/GDPR)
+        if not self.settings.get("telemetry_consent", False):
+            logger.debug("Telemetri onayı yok, veri gönderimi atlandı.")
+            return
+
         import urllib.request
         import urllib.parse
         import logging
@@ -6759,40 +8504,50 @@ exit
                 
                 CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ145iHdBr91wLtlm2bunGnUIyWt1RGbiJ8R0wxMTK5X7Nibj8OG82ydLRkFFh_zdq62wDdgUyJHpIa/pub?output=csv"
                 try:
-                    # Google'ın geçici önbelleğe almaması için sonuna zaman damgası ekliyoruz
                     no_cache_url = f"{CSV_URL}&t={int(time.time())}"
                     req = urllib.request.Request(no_cache_url, headers={'User-Agent': 'Mozilla/5.0'})
                     with urllib.request.urlopen(req, timeout=10) as response:
                         lines = [line.decode('utf-8') for line in response.readlines()]
                     
-                    reader = csv.DictReader(lines)
+                    reader = csv.reader(lines)
+                    header = next(reader, None) # Başlık satırını atla
+                    
                     users = set()
-                    translated_games = set()   # benzersiz (uid, game_name) çiftleri
+                    translated_games = set()
                     untranslated_games = set()
                     game_counts = {}
                     
+                    row_idx = 0
                     for row in reader:
-                        uid = row.get("kullanici_adi", "").strip()
-                        game_name = row.get("oyun_adi", "").strip()
-                        game_engine = row.get("oyun_motoru", "").strip()
+                        if not row or len(row) < 5: continue
+                        row_idx += 1
+                        
+                        # Sütunları index'e göre al (0: Zaman damgası, 1: ID, 2: Oyun, 3: Motor, 4: Durum, 5: İşlem Türü)
+                        uid = row[1].strip() if len(row) > 1 else ""
+                        game_name = row[2].strip() if len(row) > 2 else ""
+                        game_engine = row[3].strip() if len(row) > 3 else ""
+                        st = row[4].strip() if len(row) > 4 else ""
+                        islem_turu = row[5].strip() if len(row) > 5 else "Oyun Çevirisi"
+
+                        # Kullanıcıyı her halükarda ekle (Eğer ID geçerliyse)
                         if uid and uid != "NONE":
                             users.add(uid)
                         
-                        st = row.get("durum", "").strip()
-                        
+                        # Eğer sadece kullanıcı kaydıysa, oyun istatistiklerine girme
+                        if islem_turu == "Kullanıcı Kaydı":
+                            continue
+
                         is_translated = False
                         is_untranslated = False
                         
                         st_lower = st.lower()
                         if st in ("Çevrildi", "TEST") or st_lower == "çevrildi":
                             is_translated = True
-                        elif st == "Çevrilmedi" or st_lower == "çevrilmedi":
+                        elif st in ("Çevrilmedi", "Çevrılemedi") or st_lower == "çevrilmedi":
                             is_untranslated = True
                         else:
-                            # NONE, boş, bilinmeyen → sayma
                             continue
                             
-                        # Aynı kullanıcı + aynı oyun çifti varsa atla (tekrar sayma)
                         pair_key = (uid, game_name)
                         if is_translated:
                             if pair_key in translated_games:
@@ -6803,11 +8558,12 @@ exit
                                 continue
                             untranslated_games.add(pair_key)
                             
-                        # Eğer oyun adı varsa, tabloya eklenecek istatistiği oluştur
                         if game_name and game_name != "NONE":
                             key = (game_name, game_engine)
                             if key not in game_counts:
-                                game_counts[key] = {"users": set(), "success": 0, "fail": 0}
+                                game_counts[key] = {"users": set(), "success": 0, "fail": 0, "last_seen": row_idx}
+                            else:
+                                game_counts[key]["last_seen"] = row_idx
                             
                             if uid and uid != "NONE":
                                 game_counts[key]["users"].add(uid)
@@ -6823,29 +8579,28 @@ exit
                     translated = len(translated_games)
                     untranslated = len(untranslated_games)
                                 
-                    # Sözlükten listeye çevirip azalan sırayla dizelim (Çeviren kişi sayısına göre)
                     games_list = []
                     for (g_name, g_engine), stats in game_counts.items():
                         total_att = stats["success"] + stats["fail"]
                         if total_att == 0:
                             continue
-                        
                         rate = int((stats["success"] / total_att) * 100)
                         games_list.append({
                             "name": g_name,
                             "engine": g_engine,
                             "count": len(stats["users"]),
-                            "rate": rate
+                            "rate": rate,
+                            "seen": stats["last_seen"]
                         })
                         
-                    games_list.sort(key=lambda x: x["count"], reverse=True)
+                    # Varsayilan olarak son girilenler en uste (En Yeniler)
+                    games_list.sort(key=lambda x: x["seen"], reverse=True)
                             
                     self.stats_fetched.emit(len(users), translated, untranslated, games_list)
 
                 except Exception as e:
                     logging.error(f"Topluluk istatistikleri çekilemedi: {e}")
 
-        # Thread'in kapanmaması için MainWindow objesine bağlayalım
         self._stats_worker = StatsWorker()
         self._stats_worker.stats_fetched.connect(self._update_stats_ui)
         self._stats_worker.start()
@@ -6858,48 +8613,51 @@ exit
         if hasattr(self, 'untrans_val_lbl'):
             self.untrans_val_lbl.setText(str(untranslated))
             
-        # Topluluk verilerini sakla (oyun_adi -> rate)
+        if hasattr(self, 'donut_chart'):
+            self.donut_chart.set_data(translated, untranslated)
+
         self._community_games_data = {}
         for g in games_list:
             self._community_games_data[g["name"].lower()] = g.get("rate", 0)
         
         if hasattr(self, 'community_games_table'):
             self.community_games_table.setRowCount(0)
+            self.community_games_table.setSortingEnabled(False)
+            
             for game_info in games_list:
                 row_idx = self.community_games_table.rowCount()
                 self.community_games_table.insertRow(row_idx)
                 
                 name_item = QTableWidgetItem(game_info["name"])
-                name_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
                 self.community_games_table.setItem(row_idx, 0, name_item)
                 
                 engine_item = QTableWidgetItem(game_info["engine"])
-                engine_item.setTextAlignment(Qt.AlignCenter)
                 self.community_games_table.setItem(row_idx, 1, engine_item)
                 
                 count_item = QTableWidgetItem(f"{game_info['count']} Kişi")
-                count_item.setTextAlignment(Qt.AlignCenter)
+                count_item.setData(Qt.UserRole, game_info['count']) # Sortable data
                 self.community_games_table.setItem(row_idx, 2, count_item)
                 
                 rate = game_info.get("rate", 0)
                 if rate >= 50:
-                    status_text = f"✅ Çalışıyor (%{rate})"
+                    status_text = f"✅ %{rate}"
                     color = QColor("#10b981")
                 else:
-                    status_text = f"❌ Uyumsuz (%{rate})"
+                    status_text = f"❌ %{rate}"
                     color = QColor("#ef4444")
                     
                 status_item = QTableWidgetItem(status_text)
-                status_item.setTextAlignment(Qt.AlignCenter)
                 status_item.setForeground(color)
-                font = status_item.font()
-                font.setBold(True)
-                status_item.setFont(font)
                 self.community_games_table.setItem(row_idx, 3, status_item)
+                
+                # Gizli index kolonu (orjinal siralama)
+                idx_item = QTableWidgetItem()
+                idx_item.setData(Qt.UserRole, game_info.get("seen", 0))
+                self.community_games_table.setItem(row_idx, 4, idx_item)
 
-        # game_table'daki oyunları topluluk verisiyle işaretle
         self._mark_game_table_from_community()
-
+        if hasattr(self, '_apply_community_filters'):
+            self._apply_community_filters()
 
     def _mark_game_table_from_community(self):
         """game_table'daki oyunlara topluluk verisi ikonunu atar (col 2 = durum)."""
@@ -6981,26 +8739,7 @@ exit
         main_v.setContentsMargins(0, 0, 0, 0)
         main_v.setSpacing(20)
         
-        # Steam Next Fest Row
-        self.steam_section = QWidget()
-        self.steam_section_layout = QVBoxLayout(self.steam_section)
-        self.steam_section_layout.setContentsMargins(0, 0, 0, 0)
-        
-        st_header = QLabel("🚀 Gelecekteki Popüler Demolar (Steam Next Fest)")
-        st_header.setStyleSheet("color: #6c8eff; font-size: 16px; font-weight: bold; margin-bottom: 5px;")
-        self.steam_section_layout.addWidget(st_header)
-        
-        self.steam_grid_layout = QGridLayout()
-        self.steam_grid_layout.setSpacing(20)
-        self.steam_section_layout.addLayout(self.steam_grid_layout)
-        
-        main_v.addWidget(self.steam_section)
-        
-        # Separator Line
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("background-color: #2d3748; max-height: 1px; border: none;")
-        main_v.addWidget(line)
+
         
         # Diğer Ücretsiz Oyunlar header
         others_header = QLabel("🎁 Aktif Kampanyalar & Tam Oyunlar")
@@ -7051,11 +8790,7 @@ exit
         self.free_games_status.show()
             
         # Temizle
-        if hasattr(self, 'steam_grid_layout') and self.steam_grid_layout is not None:
-            while self.steam_grid_layout.count():
-                item = self.steam_grid_layout.takeAt(0)
-                if item and item.widget():
-                    item.widget().deleteLater()
+
 
         if hasattr(self, 'free_games_grid') and self.free_games_grid is not None:
             for i in reversed(range(self.free_games_grid.count())): 
@@ -7071,31 +8806,8 @@ exit
         self.fg_worker.error.connect(self.on_free_games_error)
         self.fg_worker.start()
 
-        # Steam Next Fest Worker
-        self.snf_worker = SteamNextFestWorker()
-        self.snf_worker.finished.connect(self.on_steam_next_fest_loaded)
-        self.snf_worker.start()
 
-    def on_steam_next_fest_loaded(self, steam_games):
-        """Steam Next Fest oyunlarını UI'ya bas (Responsive Grid)"""
-        if not hasattr(self, 'steam_grid_layout') or self.steam_grid_layout is None: return
-        
-        # Ekran genişliğine göre sütun sayısını hesapla
-        # Her kart yaklaşık 240px yer kaplıyor (230px card + 10px margin/gap)
-        width = self.width() - 300 # Sidebar ve marginleri çıkar
-        cols = max(2, width // 240) 
-        
-        for i, game in enumerate(steam_games):
-            # 4K monitörde daha fazla, küçükte daha az ama genelde 1 veya 2 satır
-            # Kullanıcı 6 tane istediği için max 12 çekmiştik, şimdi yerleştirelim
-            row = i // cols
-            col = i % cols
-            
-            # Sadece ilk 1-2 satırı göster (Üst sıra mantığını bozmamak için)
-            if row >= 2: break 
-            
-            card = SteamGameCard(game)
-            self.steam_grid_layout.addWidget(card, row, col)
+
 
 
     def on_free_games_error(self, err_msg):
@@ -7165,168 +8877,59 @@ exit
             card = FreeGameCard(game)
             self.free_games_grid.addWidget(card, row, col)
             
-    def _filter_community_table(self, text):
+    def _apply_community_filters(self):
         if not hasattr(self, 'community_games_table'):
             return
+            
+        search_text = self.community_search.text().lower() if hasattr(self, "community_search") else ""
+        sort_idx = self.filter_sort.currentIndex() if hasattr(self, "filter_sort") else 0
+        engine_idx = self.filter_engine.currentIndex() if hasattr(self, "filter_engine") else 0
+        status_idx = self.filter_status.currentIndex() if hasattr(self, "filter_status") else 0
+        
+        # Filtreleme
         for row in range(self.community_games_table.rowCount()):
-            item = self.community_games_table.item(row, 0)
-            if item:
-                self.community_games_table.setRowHidden(row, text.lower() not in item.text().lower())
-
-    def create_feedback_page(self):
-
-        """Geri Bildirim ve Destek Sayfası"""
-        layout = QVBoxLayout()
-        layout.setSpacing(25)
-        layout.setContentsMargins(30, 30, 30, 30)
-
-        # Başlık ve Uyarı
-        header_v = QVBoxLayout()
-        title = QLabel("📣 Geri Bildirim ve Destek")
-        title.setStyleSheet("color: #e8edf2; font-size: 24px; font-weight: bold;")
-        
-        warning = QLabel("⚠️ Lütfen oyun çevirisi istemeyin! Bu kanal sadece MemoFast'in gelişimi için öneriler ve hata raporlarını içerir.")
-        warning.setStyleSheet("color: #fbbf24; font-size: 13px; font-weight: 500; margin-top: 5px;")
-        
-        more_info = QLabel('Daha fazlası, yardım ve topluluk için: <a href="https://www.youtube.com/@MehmetariTv" style="color: #6c8eff; text-decoration: none;">Mehmet Arı YouTube Kanalı</a>')
-        more_info.setOpenExternalLinks(True)
-        more_info.setStyleSheet("color: #94a3b8; font-size: 13px;")
-        
-        header_v.addWidget(title)
-        header_v.addWidget(warning)
-        header_v.addWidget(more_info)
-        layout.addLayout(header_v)
-
-        # Form Alanı
-        form_group = QGroupBox("Bize Yazın")
-        form_group.setStyleSheet("QGroupBox { color: " + self.accent_color + "; font-size: 16px; font-weight: bold; border: 1px solid #2d3748; border-radius: 12px; margin-top: 20px; padding-top: 25px; background-color: #141823; }")
-        
-        fg_layout = QVBoxLayout()
-        fg_layout.setContentsMargins(30, 40, 30, 30)
-        fg_layout.setSpacing(20)
-
-        # Konu Seçimi
-        type_v = QVBoxLayout()
-        type_lbl = QLabel("Konu Başlığı:")
-        type_lbl.setStyleSheet("color: #e8edf2; font-weight: bold;")
-        self.fb_type_combo = QComboBox()
-        # ÖNEMLİ: Buradaki metinler senin Google Form'undaki seçeneklerle BİREBİR AYNI olmalı
-        self.fb_type_combo.addItems(["Hata Raporu", "Öneri", "Teşekkür"])
-        self.fb_type_combo.setFixedHeight(40)
-        self.fb_type_combo.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 8px; padding: 5px 15px; }")
-        type_v.addWidget(type_lbl)
-        type_v.addWidget(self.fb_type_combo)
-        fg_layout.addLayout(type_v)
-
-        # İletişim
-        contact_v = QVBoxLayout()
-        contact_lbl = QLabel("İletişim (E-posta veya Discord):")
-        contact_lbl.setStyleSheet("color: #e8edf2; font-weight: bold;")
-        self.fb_contact_input = QLineEdit()
-        self.fb_contact_input.setPlaceholderText("Sana ulaşabilmemiz için...")
-        self.fb_contact_input.setFixedHeight(40)
-        self.fb_contact_input.setStyleSheet("QLineEdit { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 8px; padding: 5px 15px; }")
-        contact_v.addWidget(contact_lbl)
-        contact_v.addWidget(self.fb_contact_input)
-        fg_layout.addLayout(contact_v)
-
-        # Mesaj
-        msg_v = QVBoxLayout()
-        msg_lbl = QLabel("Mesajınız:")
-        msg_lbl.setStyleSheet("color: #e8edf2; font-weight: bold;")
-        self.fb_message_input = QTextEdit()
-        self.fb_message_input.setPlaceholderText("Lütfen detaylıca açıklayın...")
-        self.fb_message_input.setMinimumHeight(150)
-        self.fb_message_input.setStyleSheet("QTextEdit { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 12px; padding: 15px; font-size: 14px; }")
-        msg_v.addWidget(msg_lbl)
-        msg_v.addWidget(self.fb_message_input)
-        fg_layout.addLayout(msg_v)
-
-        # Gönder Butonu
-        self.fb_send_btn = QPushButton("🚀 Geri Bildirimi Gönder")
-        self.fb_send_btn.setFixedHeight(50)
-        self.fb_send_btn.setCursor(Qt.PointingHandCursor)
-        self.fb_send_btn.setStyleSheet("QPushButton { background-color: " + self.accent_color + "; color: white; border-radius: 8px; font-size: 16px; font-weight: bold; } QPushButton:hover { background-color: #5a7bee; }")
-        self.fb_send_btn.clicked.connect(self.send_feedback)
-        fg_layout.addWidget(self.fb_send_btn)
-
-        form_group.setLayout(fg_layout)
-        layout.addWidget(form_group)
-        layout.addStretch()
-        
-        # Sayfayı stack'e ekle (switch_page bunu doğru index'e taşıyacak)
-        page_widget = self.create_page_template("Geri Bildirim", layout)
-        self.stack.addWidget(page_widget)
-
-    def send_feedback(self):
-        """Geri bildirimi AI denetiminden geçirdikten sonra Google Form'a gönderir"""
-        fb_message = self.fb_message_input.toPlainText().strip()
-        
-        if not fb_message:
-            QMessageBox.warning(self, "Uyarı", "Lütfen bir mesaj yazın.")
-            return
-
-        # 1. AI Denetimini Başlat
-        api_key = self.settings.get("gemini_api_key", "")
-        pref_model = self.settings.get("preferred_gemini_model")
-        
-        self.fb_send_btn.setEnabled(False)
-        self.fb_send_btn.setText("AI Denetleniyor...")
-        
-        self.fb_moderator = FeedbackModeratorWorker(api_key, fb_message, pref_model)
-        self.fb_moderator.finished.connect(self.on_feedback_moderated)
-        self.fb_moderator.error.connect(lambda err: self.on_feedback_moderated(True, "AI Hatası")) # Hata varsa geçsin
-        self.fb_moderator.start()
-
-    def on_feedback_moderated(self, is_allowed, reason):
-        """AI denetimi bittiğinde asıl gönderim işlemini yap veya engelle"""
-        if not is_allowed:
-            QMessageBox.critical(self, "Engellendi", reason)
-            self.fb_send_btn.setEnabled(True)
-            self.fb_send_btn.setText("📧 Geri Bildirimi Gönder")
-            return
-
-        # 2. Eğer onaylandıysa asıl gönderim işlemini yap
-        fb_type_full = self.fb_type_combo.currentText()
-        fb_type = fb_type_full.replace("🐛 ", "").replace("💡 ", "").replace("🌟 ", "").split(" / ")[0]
-        fb_contact = self.fb_contact_input.text().strip()
-        fb_message = self.fb_message_input.toPlainText().strip()
-
-        FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSewcNBn7F-I2o5BvUmkzx-B3LaQh6YqcWLE2UH6ku_6252lgQ/formResponse"
-        
-        data = {
-            "entry.167998956": fb_type,
-            "entry.1163246443": fb_contact if fb_contact else "Belirtilmedi",
-            "entry.981290208": fb_message + f"\n\n[Sürüm: {Config.VERSION}]"
-        }
-
-        try:
-            self.fb_send_btn.setText("Gönderiliyor...")
+            hidden = False
             
-            from urllib.parse import urlencode
-            from urllib.request import Request, urlopen
-            
-            encoded_data = urlencode(data).encode("utf-8")
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-            
-            req = Request(FORM_URL, data=encoded_data, headers=headers, method="POST")
-            
-            with urlopen(req, timeout=10) as response:
-                if response.status == 200 or response.status == 302:
-                    QMessageBox.information(self, "Başarılı", "Geri bildiriminiz başarıyla iletildi. Teşekkürler!")
-                    self.fb_message_input.clear()
-                    self.fb_contact_input.clear()
-                else:
-                    raise Exception(f"HTTP Durum Kodu: {response.status}")
+            # Arama filtresi
+            item_name = self.community_games_table.item(row, 0)
+            if item_name and search_text not in item_name.text().lower():
+                hidden = True
+                
+            # Motor filtresi (1: Unity, 2: Unreal, 3: Diger)
+            if not hidden and engine_idx > 0:
+                engine_val = self.community_games_table.item(row, 1).text().lower()
+                if engine_idx == 1 and "unity" not in engine_val:
+                    hidden = True
+                elif engine_idx == 2 and "unreal" not in engine_val:
+                    hidden = True
+                elif engine_idx == 3 and ("unity" in engine_val or "unreal" in engine_val):
+                    hidden = True
                     
-        except Exception as e:
-            logger.error("Feedback gönderim hatası: %s", e)
-            # Gerçek hatayı kullanıcıya gösterelim ki ne olduğunu anlayalım
-            QMessageBox.critical(self, "Hata", f"Gönderim başarısız oldu.\n\nHata: {str(e)}\n\nLütfen internet bağlantınızı kontrol edin veya daha sonra tekrar deneyin.")
-        finally:
-            self.fb_send_btn.setEnabled(True)
-            self.fb_send_btn.setText("🚀 Geri Bildirimi Gönder")
+            # Durum Filtresi (1: Çevrilen, 2: Çevrilemeyen)
+            if not hidden and status_idx > 0:
+                stats_val = self.community_games_table.item(row, 3).text()
+                if status_idx == 1 and "✅" not in stats_val:
+                    hidden = True
+                elif status_idx == 2 and "❌" not in stats_val:
+                    hidden = True
+                    
+            self.community_games_table.setRowHidden(row, hidden)
 
+        # Siralama
+        self.community_games_table.setSortingEnabled(False)
+        if sort_idx == 0:
+             # En Yeniler -> Sütun 4 (Gizli seen index) Büyükten Küçüğe
+             self.community_games_table.sortItems(4, Qt.DescendingOrder)
+        elif sort_idx == 1:
+             # Popüler -> Sütun 2 (Kullanıcı Sayısı) Büyükten Küçüğe
+             self.community_games_table.sortItems(2, Qt.DescendingOrder)
+        elif sort_idx == 2:
+             # A-Z -> Sütun 0
+             self.community_games_table.sortItems(0, Qt.AscendingOrder)
+        elif sort_idx == 3:
+             # Z-A -> Sütun 0
+             self.community_games_table.sortItems(0, Qt.DescendingOrder)
+        
     def create_about_page(self):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
@@ -7356,7 +8959,8 @@ exit
         help_btn.setStyleSheet("QPushButton { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 8px; font-weight: bold; } QPushButton:hover { background-color: #2d3748; border-color: #fbbf24; }")
         help_btn.clicked.connect(self.show_welcome_dialog)
 
-        cop = QLabel("© 2024 Mehmet Arı. Tüm hakları saklıdır.")
+        from datetime import datetime as _dt
+        cop = QLabel(f"© {_dt.now().year} Mehmet Arı. Tüm hakları saklıdır.")
         cop.setStyleSheet("color: #6b7280; font-size: 12px; margin-top: 40px;")
         
         layout.addWidget(logo, 0, Qt.AlignCenter)
@@ -7479,121 +9083,94 @@ exit
             QLabel#CardTitle { color: #3b82f6; font-size: 16px; font-weight: bold; }
         """
         
-        # --- CARD 1: SERVİS ---
-        card_service = QFrame()
-        card_service.setStyleSheet(card_style)
-        cs_layout = QVBoxLayout(card_service)
-        cs_layout.setContentsMargins(20, 20, 20, 20)
-        cs_layout.setSpacing(15)
+        # --- CARD 1: OCR MOTORLARI (SEÇMELİ) ---
+        card_rst = QFrame()
+        card_rst.setStyleSheet(card_style)
+        cr_layout = QVBoxLayout(card_rst)
+        cr_layout.setContentsMargins(20, 20, 20, 20)
+        cr_layout.setSpacing(15)
         
-        lbl_cs_title = QLabel("🌐 Servis Yapılandırması")
-        lbl_cs_title.setObjectName("CardTitle")
-        cs_layout.addWidget(lbl_cs_title)
+        lbl_cr_title = QLabel("🔮 Ekran Çeviri Motorları (Çoklu)")
+        lbl_cr_title.setObjectName("CardTitle")
+        cr_layout.addWidget(lbl_cr_title)
         
-        cs_layout.addWidget(QLabel("Ana OCR Kısayolu:"))
-        val = p_to_q(self.settings.get("ocr_shortcut", "Ctrl+P"))
-        self.ocr_hotkey_input = QKeySequenceEdit(QKeySequence(val))
-        self.ocr_hotkey_input.setFixedHeight(38)
-        self.ocr_hotkey_input.setStyleSheet(INPUT_STYLE)
-        cs_layout.addWidget(self.ocr_hotkey_input)
+        help_txt = QLabel("• Orijinal Sistem veya Yeni RST Harici motoru arasından seçim yapabilirsiniz.")
+        help_txt.setStyleSheet("color: #94a3b8; font-size: 13px; line-height: 20px;")
+        help_txt.setWordWrap(True)
+        cr_layout.addWidget(help_txt)
         
-        cs_layout.addWidget(QLabel("OCR Görüntü İşleme Motoru:"))
-        self.ocr_engine_combo = QComboBox()
-        self.ocr_engine_combo.addItems(["Windows OCR (Translumo - Çok Hızlı)", "Tesseract OCR (Klasik)", "EasyOCR (Yapay Zeka)"])
-        self.ocr_engine_combo.setFixedHeight(38)
-        self.ocr_engine_combo.setStyleSheet(INPUT_STYLE + " QComboBox::drop-down { border: none; }")
-        cs_layout.addWidget(self.ocr_engine_combo)
+        cr_layout.addWidget(QLabel("RST Motoru İçin Hedef Oyun Penceresi:"))
         
-        cs_layout.addWidget(QLabel("Çeviri Servisi:"))
-        self.ocr_service_combo = QComboBox()
-        self.ocr_service_combo.addItems(["Google (Ücretsiz)", "DeepL (Hızlı)", "Gemini AI (Zeki)"])
-        self.ocr_service_combo.setFixedHeight(38)
-        self.ocr_service_combo.setStyleSheet(INPUT_STYLE + " QComboBox::drop-down { border: none; }")
-        cs_layout.addWidget(self.ocr_service_combo)
+        h_combo = QHBoxLayout()
+        self.rst_game_combo = QComboBox()
+        self.rst_game_combo.setFixedHeight(38)
+        self.rst_game_combo.setStyleSheet(INPUT_STYLE + " QComboBox::drop-down { border: none; }")
         
-        self.ocr_api_label = QLabel("API Anahtarı:")
-        self.ocr_api_input = QLineEdit()
-        self.ocr_api_input.setPlaceholderText("Buraya yapıştırın...")
-        self.ocr_api_input.setEchoMode(QLineEdit.Password)
-        self.ocr_api_input.setFixedHeight(38)
-        self.ocr_api_input.setStyleSheet(INPUT_STYLE)
-        cs_layout.addWidget(self.ocr_api_label)
-        cs_layout.addWidget(self.ocr_api_input)
+        self.refresh_windows_btn = QPushButton("🔄 Yenile")
+        self.refresh_windows_btn.setFixedHeight(38)
+        self.refresh_windows_btn.setStyleSheet(INPUT_STYLE)
+        self.refresh_windows_btn.clicked.connect(self.populate_windows if hasattr(self, 'populate_windows') else lambda: None)
         
-        cards_layout.addWidget(card_service, 0, 0)
+        h_combo.addWidget(self.rst_game_combo, stretch=3)
+        h_combo.addWidget(self.refresh_windows_btn, stretch=1)
+        cr_layout.addLayout(h_combo)
         
-        # --- CARD 2: AUDIO ---
-        card_audio = QFrame()
-        card_audio.setStyleSheet(card_style)
-        ca_layout = QVBoxLayout(card_audio)
+        # Orijinal MemoFast OCR BUTONU
+        self.start_legacy_btn = QPushButton("🌐 [ESKİ] Yerleşik OCR Başlat (Kısayollu)")
+        self.start_legacy_btn.setFixedHeight(45)
+        self.start_legacy_btn.setCursor(Qt.PointingHandCursor)
+        self.start_legacy_btn.setStyleSheet("QPushButton { background-color: #8b5cf6; color: white; border-radius: 8px; font-weight: bold; font-size: 14px; } QPushButton:hover { background-color: #7c3aed; }")
+        self.start_legacy_btn.clicked.connect(self.launch_legacy_ocr if hasattr(self, 'launch_legacy_ocr') else lambda: None)
+        cr_layout.addWidget(self.start_legacy_btn)
+
+        # YENI RST OCR BUTONU
+        self.start_rst_btn = QPushButton("🚀 [YENİ] RST Harici OCR Başlat")
+        self.start_rst_btn.setFixedHeight(45)
+        self.start_rst_btn.setCursor(Qt.PointingHandCursor)
+        self.start_rst_btn.setStyleSheet("QPushButton { background-color: #3b82f6; color: white; border-radius: 8px; font-weight: bold; font-size: 14px; } QPushButton:hover { background-color: #2563eb; }")
+        self.start_rst_btn.clicked.connect(self.launch_rst_engine if hasattr(self, 'launch_rst_engine') else lambda: None)
+        cr_layout.addWidget(self.start_rst_btn)
+        
+        self.stop_rst_btn = QPushButton("🛑 RST Harici Motorunu Durdur")
+        self.stop_rst_btn.setFixedHeight(45)
+        self.stop_rst_btn.setCursor(Qt.PointingHandCursor)
+        self.stop_rst_btn.setStyleSheet("QPushButton { background-color: #ef4444; color: white; border-radius: 8px; font-weight: bold; font-size: 14px; } QPushButton:hover { background-color: #dc2626; }")
+        self.stop_rst_btn.clicked.connect(self.stop_rst_engine if hasattr(self, 'stop_rst_engine') else lambda: None)
+        cr_layout.addWidget(self.stop_rst_btn)
+        
+        cr_layout.addStretch()
+        cards_layout.addWidget(card_rst, 0, 0)
+        
+        # --- CARD 2: API KEY AYARLARI ---
+        card_api = QFrame()
+        card_api.setStyleSheet(card_style)
+        ca_layout = QVBoxLayout(card_api)
         ca_layout.setContentsMargins(20, 20, 20, 20)
         ca_layout.setSpacing(15)
         
-        lbl_ca_title = QLabel("🎙️ Dublaj ve Ses")
+        lbl_ca_title = QLabel("🔑 AI Modeli & API")
         lbl_ca_title.setObjectName("CardTitle")
         ca_layout.addWidget(lbl_ca_title)
         
-        self.cb_dubbing = QCheckBox("Metni Seslendir (Dublaj)")
-        self.cb_dubbing.setChecked(self.settings.get("ocr_dubbing", False))
-        self.cb_dubbing.setStyleSheet("QCheckBox { color: white; font-weight: bold; }")
-        ca_layout.addWidget(self.cb_dubbing)
+        ca_layout.addWidget(QLabel("Çeviri Servisi:"))
+        self.ocr_service_combo = QComboBox()
+        self.ocr_service_combo.addItems(["Gemini AI (Zeki & Ücretsiz)", "DeepL (Hızlı)", "Google (Standart)", "Yerel AI (Llama-3.1) - ÇOK KALİTELİ"])
+        self.ocr_service_combo.setFixedHeight(38)
+        self.ocr_service_combo.setStyleSheet(INPUT_STYLE + " QComboBox::drop-down { border: none; }")
+        ca_layout.addWidget(self.ocr_service_combo)
         
-        ca_layout.addWidget(QLabel("Ses Karakteri:"))
-        self.combo_voice = QComboBox()
-        self.combo_voice.addItems(["Kadın (Emel)", "Erkek (Ahmet)"])
-        self.combo_voice.setFixedHeight(38)
-        self.combo_voice.setStyleSheet(INPUT_STYLE + " QComboBox::drop-down { border: none; }")
-        ca_layout.addWidget(self.combo_voice)
+        self.ocr_api_label = QLabel("API Anahtarı:")
+        self.ocr_api_input = QLineEdit()
+        self.ocr_api_input.setPlaceholderText("API anahtarınızı buraya yapıştırın...")
+        self.ocr_api_input.setEchoMode(QLineEdit.Password)
+        self.ocr_api_input.setFixedHeight(38)
+        self.ocr_api_input.setStyleSheet(INPUT_STYLE)
+        ca_layout.addWidget(self.ocr_api_label)
+        ca_layout.addWidget(self.ocr_api_input)
         
         ca_layout.addStretch()
-        cards_layout.addWidget(card_audio, 0, 1)
+        cards_layout.addWidget(card_api, 0, 1)
 
-        # --- CARD 3: LIVE ---
-        card_live = QFrame()
-        card_live.setStyleSheet(card_style)
-        cl_layout = QVBoxLayout(card_live)
-        cl_layout.setContentsMargins(20, 20, 20, 20)
-        cl_layout.setSpacing(15)
-        
-        lbl_cl_title = QLabel("⚡ Canlı Tarama Modu")
-        lbl_cl_title.setObjectName("CardTitle")
-        cl_layout.addWidget(lbl_cl_title)
-        
-        cl_layout.addWidget(QLabel("Canlı Mod Başlat:"))
-        v_start = p_to_q(self.settings.get("ocr_start_shortcut", "Ctrl+O"))
-        self.ocr_start_hk = QKeySequenceEdit(QKeySequence(v_start))
-        self.ocr_start_hk.setFixedHeight(38)
-        self.ocr_start_hk.setStyleSheet(INPUT_STYLE.replace("#ffffff", "#60a5fa")) # Mavi metin
-        cl_layout.addWidget(self.ocr_start_hk)
-        
-        cl_layout.addWidget(QLabel("Canlı Mod Durdur:"))
-        v_stop = p_to_q(self.settings.get("ocr_stop_shortcut", "Ctrl+L"))
-        self.ocr_stop_hk = QKeySequenceEdit(QKeySequence(v_stop))
-        self.ocr_stop_hk.setFixedHeight(38)
-        self.ocr_stop_hk.setStyleSheet(INPUT_STYLE.replace("#ffffff", "#f87171")) # Kırmızı metin
-        cl_layout.addWidget(self.ocr_stop_hk)
-
-        self.cb_filter_mm = QCheckBox("Mek/Mak Dilbilgisi Filtresi")
-        self.cb_filter_mm.setChecked(self.settings.get("ocr_filter_mekmak", True))
-        self.cb_filter_mm.setStyleSheet("QCheckBox { color: white; }")
-        cl_layout.addWidget(self.cb_filter_mm)
-        
-        cards_layout.addWidget(card_live, 1, 0)
-
-        # --- CARD 4: HELP ---
-        card_help = QFrame()
-        card_help.setStyleSheet(card_style)
-        ch_layout = QVBoxLayout(card_help)
-        ch_layout.setContentsMargins(20, 20, 20, 20)
-        ch_layout.addWidget(QLabel("📖 İpuçları"))
-        
-        help_txt = QLabel("• Okunmayan yazılar için alanı biraz genişletin.\n• FPS düşüşü olursa Canlı Modu durdurun.\n• Gemini AI oyun bağlamını daha iyi anlar.")
-        help_txt.setStyleSheet("color: #94a3b8; font-size: 13px; line-height: 20px;")
-        help_txt.setWordWrap(True)
-        ch_layout.addWidget(help_txt)
-        ch_layout.addStretch()
-        
-        cards_layout.addWidget(card_help, 1, 1)
         layout.addLayout(cards_layout)
         
         # --- SAVE ---
@@ -7618,15 +9195,10 @@ exit
         self.ocr_service_combo.currentIndexChanged.connect(self.on_ocr_service_changed)
         current_srv = self.settings.get("translator_service", "google")
         if current_srv == "deepl": self.ocr_service_combo.setCurrentIndex(1)
-        elif current_srv == "gemini": self.ocr_service_combo.setCurrentIndex(2)
-        else: self.ocr_service_combo.setCurrentIndex(0)
+        elif current_srv == "gemini": self.ocr_service_combo.setCurrentIndex(0)
+        elif current_srv == "local_ai": self.ocr_service_combo.setCurrentIndex(3)
+        else: self.ocr_service_combo.setCurrentIndex(2) # Google (idx 2)
         self.on_ocr_service_changed(self.ocr_service_combo.currentIndex())
-
-        # Motor mevcut durumu yükle
-        current_eng = self.settings.get("ocr_engine", "windows")
-        if current_eng == "tesseract": self.ocr_engine_combo.setCurrentIndex(1)
-        elif current_eng == "easyocr": self.ocr_engine_combo.setCurrentIndex(2)
-        else: self.ocr_engine_combo.setCurrentIndex(0)
 
         content_scroll.setWidget(content_widget)
         main_layout.addWidget(content_scroll)
@@ -7636,7 +9208,7 @@ exit
 
     def on_ocr_service_changed(self, idx):
         """Servis değişince UI güncelle"""
-        if idx == 0: # Google
+        if idx == 2 or idx == 3: # Google veya Yerel AI
             self.ocr_api_label.hide()
             self.ocr_api_input.hide()
         elif idx == 1: # DeepL
@@ -7644,7 +9216,7 @@ exit
             self.ocr_api_input.show()
             self.ocr_api_input.setText(self.settings.get("deepl_api_key", ""))
             self.ocr_api_label.setText("DeepL API Key:")
-        elif idx == 2: # Gemini
+        elif idx == 0: # Gemini
             self.ocr_api_label.show()
             self.ocr_api_input.show()
             self.ocr_api_input.setText(self.settings.get("gemini_api_key", ""))
@@ -7652,45 +9224,198 @@ exit
             
     def save_ocr_settings(self):
         """OCR ayarlarını kaydet ve uygula"""
-        # Helper to convert Qt sequence to pynput format
-        def q_to_p(seq):
-            return seq.lower().replace("ctrl", "<ctrl>").replace("shift", "<shift>").replace("alt", "<alt>").replace("+", "+")
-
-        # 1. Kısayollar
-        self.settings["ocr_shortcut"] = q_to_p(self.ocr_hotkey_input.keySequence().toString())
-        self.settings["ocr_start_shortcut"] = q_to_p(self.ocr_start_hk.keySequence().toString())
-        self.settings["ocr_stop_shortcut"] = q_to_p(self.ocr_stop_hk.keySequence().toString())
         
         idx = self.ocr_service_combo.currentIndex()
-        srv = ["google", "deepl", "gemini"][idx]
+        srv = ["gemini", "deepl", "google", "local_ai"][idx]
         self.settings["translator_service"] = srv
-        
-        eng_idx = self.ocr_engine_combo.currentIndex()
-        eng = ["windows", "tesseract", "easyocr"][eng_idx]
-        self.settings["ocr_engine"] = eng
         
         # Key'i güncelle
         key = self.ocr_api_input.text().strip()
         if srv == "deepl": self.settings["deepl_api_key"] = key
         elif srv == "gemini": self.settings["gemini_api_key"] = key
         
-        # 3. Dublaj ve Filtreler
-        self.settings["ocr_dubbing"] = self.cb_dubbing.isChecked()
-        self.settings["ocr_voice_gender"] = "Female" if self.combo_voice.currentIndex() == 0 else "Male"
-        self.settings["ocr_filter_mekmak"] = self.cb_filter_mm.isChecked()
-            
         self.save_settings()
+        QMessageBox.information(self, "Başarılı", "OCR ayarları kaydedildi! ✅")
         
-        # 4. Translator Overlay'i güncelle
-        if hasattr(self, 'translator') and self.translator:
-            try:
-                self.translator.start_hotkey_listener() # Kısayolları yenile
-            except: pass
+    def populate_windows(self):
+        """Kütüphanedeki oyunları listeler ve RST OCR Combo'suna ekler"""
+        if not hasattr(self, 'rst_game_combo'): return
+        
+        self.rst_game_combo.clear()
+        self.rst_game_combo.addItem("🎮 Genel Mod (Oyun Seçmeden Tam Ekran Tarama)")
+        
+        try:
+            from scanner import GameEngineScanner
+            scanner = GameEngineScanner()
+            games = scanner.load_cache()
             
-        QMessageBox.information(self, "Başarılı", "OCR ve Dublaj ayarları kaydedildi! ✅")
+            if not games:
+                self.rst_game_combo.addItem("Kütüphane Boş")
+                return
+                
+            for game in games:
+                self.rst_game_combo.addItem(f"🎮 {game['name']}", game)
+                
+        except Exception as e:
+            self.rst_game_combo.addItem(f"Hata: {str(e)}")
+            print(f"Oyun listesi alınırken hata: {e}")
+            
+    def launch_rst_engine(self):
+        import subprocess
+        import os
+        import glob
+        
+        # ✅ RST güncelleme koruması kur (tüm platformlarda çalışacak)
+        try:
+            from update_blocker import UpdateBlocker
+            blocker = UpdateBlocker()
+            if not blocker.is_update_blocked():
+                success, msg = blocker.block_updates()
+                if success:
+                    logger.info(f"✅ Güncelleme Koruma: {msg}")
+                else:
+                    # Admin hakkı yoksa uyarı verelim ama devam et
+                    logger.warning(f"⚠️ Güncelleme Koruma Uyarısı: {msg}")
+        except ImportError as e:
+            logger.warning(f"⚠️ Güncelleme koruması yüklenemedi: {e} (Uygulamaya devam ediliyor)")
+        
+        # Dinamik olarak RST klasörünü ve exe dosyasını bul
+        base_dir = os.getcwd()
+        possible_folders = glob.glob(os.path.join(base_dir, "RSTGameTranslation*"))
+        
+        rst_path = None
+        for folder in possible_folders:
+            if os.path.isdir(folder):
+                exe_lower = os.path.join(folder, "rst.exe")
+                exe_upper = os.path.join(folder, "RST.exe")
+                
+                if os.path.exists(exe_lower):
+                    rst_path = exe_lower
+                    break
+                elif os.path.exists(exe_upper):
+                    rst_path = exe_upper
+                    break
+                    
+        if not rst_path or not os.path.exists(rst_path):
+            QMessageBox.warning(self, "Hata", "RSTGame EXE bulunamadı!\nLütfen proje klasöründe 'RSTGameTranslation' ile başlayan bir klasör olduğundan emin olun.")
+            return
+            
+        try:
+            # 1. Config Eşitlemesi (Uzaktan Kumanda)
+            cfg_path = os.path.join(os.path.dirname(rst_path), "config.txt")
+            if os.path.exists(cfg_path):
+                updates = {
+                    "tts_enabled": "false",
+                    "translator_service": self.settings.get("translator_service", "gemini")
+                }
+                if updates["translator_service"] == "gemini":
+                    updates["gemini_api_key"] = self.settings.get("gemini_api_key", "")
+                elif updates["translator_service"] == "deepl":
+                    updates["deepl_api_key"] = self.settings.get("deepl_api_key", "")
 
+                try:
+                    with open(cfg_path, 'r', encoding='utf-8') as f: lines = f.readlines()
+                    with open(cfg_path, 'w', encoding='utf-8') as f:
+                        for l in lines:
+                            written = False
+                            for key, val in updates.items():
+                                if l.startswith(f"{key}|"):
+                                    f.write(f"{key}|{val}|\n")
+                                    written = True
+                                    break
+                            if not written: f.write(l)
+                except: pass
+            
+            # 2. RST.exe'yi Admin Modunda Çalıştırma
+            try:
+                # os.startfile ile "runas" = Admin izni iste
+                os.startfile(rst_path, "runas")
+                # Process tracking yapma (runas ile tracking yapılamıyor)
+                self.rst_process = None
+                
+            except Exception as admin_error:
+                logger.error(f"RST başlatılamadı: {admin_error}")
+                QMessageBox.warning(self, "Hata", 
+                    f"❌ RST başlatılamadı!\n\n"
+                    f"{str(admin_error)}\n\n"
+                    f"Çözüm: MemoFast uygulamasını Admin modunda çalıştırın.\n"
+                    f"(Sağ tık → Yönetici olarak çalıştır)")
+            
+            self.start_rst_btn.setText("Motor Çalışıyor...")
+            self.start_rst_btn.setStyleSheet("QPushButton { background-color: #10b981; color: white; border-radius: 8px; font-weight: bold; font-size: 14px; }")
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Hata", f"RST Modülü başlatılamadı:\n{e}\n\nLütfen MemoFast uygulamasını Admin modunda çalıştırmayı deneyin.")
+            
+    def stop_rst_engine(self):
+        import subprocess
+        import psutil
+        
+        stopped = False
+        
+        # 1. Kaydedilmiş process nesnesinden durdurma
+        if hasattr(self, 'rst_process') and self.rst_process and self.rst_process.poll() is None:
+            try:
+                self.rst_process.terminate()
+                self.rst_process.wait(timeout=3)
+                stopped = True
+                logger.info("RST process başarıyla kapatıldı (process handle)")
+            except:
+                try:
+                    self.rst_process.kill()
+                    stopped = True
+                    logger.info("RST process kill edildi")
+                except:
+                    pass
+        
+        # 2. psutil ile RST process'ini bul ve kapat
+        if not stopped:
+            try:
+                for proc in psutil.process_iter(['pid', 'name']):
+                    try:
+                        if proc.name().lower() == "rst.exe":
+                            proc.kill()  # SIGKILL gönder
+                            logger.info(f"RST process kapatıldı (psutil - PID: {proc.pid})")
+                            stopped = True
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+            except Exception as e:
+                logger.warning(f"psutil ile RST kapatma başarısız: {e}")
+        
+        # 3. Fallback: taskkill komutu
+        if not stopped:
+            try:
+                result = subprocess.run(["taskkill", "/F", "/IM", "rst.exe"], 
+                                       capture_output=True, text=True)
+                if result.returncode == 0:
+                    logger.info("RST process taskkill ile kapatıldı")
+                    stopped = True
+            except Exception as e:
+                logger.warning(f"taskkill başarısız: {e}")
+        
+        # UI güncelle
+        self.start_rst_btn.setText("🚀 [YENİ] RST Harici OCR Başlat")
+        self.start_rst_btn.setStyleSheet("QPushButton { background-color: #3b82f6; color: white; border-radius: 8px; font-weight: bold; font-size: 14px; } QPushButton:hover { background-color: #2563eb; }")
+        
+        # Sonuç mesajı
+        if stopped:
+            QMessageBox.information(self, "Başarılı", "✅ RST Motor durduruldu")
+        else:
+            QMessageBox.warning(self, "Uyarı", "⚠️ RST Motor durdurulamadı.\nLütfen elle kapatmayı deneyin.")
 
-    
+    def launch_legacy_ocr(self):
+        try:
+            from screen_translator import ScreenTranslatorOverlay
+            if not hasattr(self, 'legacy_ocr_overlay') or self.legacy_ocr_overlay is None:
+                self.legacy_ocr_overlay = ScreenTranslatorOverlay()
+                self.legacy_ocr_overlay.start_hotkey_listener()
+            
+            # Yazıyı ve rengi güncelle, ama ekranı hemen karartma (toggle_visibility() ÇIKARTILDI)
+            self.start_legacy_btn.setText("📡 OCR Dinleyici Aktif")
+            self.start_legacy_btn.setStyleSheet("QPushButton { background-color: #10b981; color: white; border-radius: 8px; font-weight: bold; font-size: 14px; }")
+        except Exception as e:
+            QMessageBox.warning(self, "Hata", f"Yerleşik OCR başlatılırken hata oluştu:\n{e}")
+            
     def create_platform_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -7941,6 +9666,12 @@ exit
                     self.scan_thread.progress.connect(lambda msg, p: self.p_status.setText(msg))
                     self.scan_thread.finished.connect(self.on_scan_finished)
                     self.scan_thread.start()
+                else:
+                    self.p_status.setText("⚠️ 'new' klasörü boş, hedef dosya bulunamadı!")
+                    self.rescan_btn.setEnabled(True)
+            else:
+                self.p_status.setText(f"⚠️ Yama dosyası klasörü eksik: {self.current_game}/new")
+                self.rescan_btn.setEnabled(True)
     
 
     
@@ -8013,6 +9744,12 @@ exit
                 self.scan_thread.progress.connect(lambda msg, p: self.p_status.setText(msg))
                 self.scan_thread.finished.connect(self.on_scan_finished)
                 self.scan_thread.start()
+            else:
+                self.p_status.setText("⚠️ 'new' klasörü boş, hedef dosya bulunamadı!")
+                self.rescan_btn.setEnabled(True)
+        else:
+            self.p_status.setText(f"⚠️ Yama dosyası klasörü eksik: {self.current_game}/new")
+            self.rescan_btn.setEnabled(True)
 
     def apply_patch(self, patch_type):
         import time
@@ -8141,34 +9878,37 @@ exit
         content_widget = QWidget()
         content_widget.setStyleSheet("background-color: #0f1419;")
         cl = QVBoxLayout(content_widget)
-        cl.setContentsMargins(40, 40, 40, 40)
-        cl.setSpacing(20)
+        cl.setContentsMargins(14, 12, 14, 12)
+        cl.setSpacing(10)
         
         # --- HERO BANNER ---
         banner = QFrame()
-        banner.setFixedHeight(120)
+        banner.setFixedHeight(58)
         banner.setStyleSheet("""
             QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgba(59, 130, 246, 0.1), stop:1 rgba(147, 51, 234, 0.1));
-                border: 1px solid rgba(59, 130, 246, 0.2);
-                border-radius: 15px;
+                background: #1a1f2e;
+                border: 1px solid #2d3748;
+                border-radius: 8px;
             }
         """)
         banner_layout = QHBoxLayout(banner)
-        banner_layout.setContentsMargins(30, 0, 30, 0)
+        banner_layout.setContentsMargins(12, 0, 12, 0)
         
         title_v = QVBoxLayout()
-        title_v.setAlignment(Qt.AlignCenter)
-        lbl_title = QLabel("🌐 OTOMATİK OYUN ÇEVİRİSİ")
-        lbl_title.setStyleSheet("color: #3b82f6; font-size: 26px; font-weight: 900; letter-spacing: 1px; border: none; background: transparent;")
+        title_v.setAlignment(Qt.AlignVCenter)
+        lbl_title = QLabel("🌐  Otomatik oyun çevirisi")
+        lbl_title.setStyleSheet("color: #e8edf2; font-size: 22px; font-weight: 800; letter-spacing: 0px; border: none; background: transparent;")
         
-        lbl_subtitle = QLabel("Unity ve Unreal oyunlarını saniyeler içinde tespit edin ve modlayın.")
-        lbl_subtitle.setStyleSheet("color: #94a3b8; font-size: 14px; border: none; background: transparent;")
+        lbl_subtitle = QLabel("")
+        lbl_subtitle.setStyleSheet("color: #94a3b8; font-size: 12px; border: none; background: transparent;")
         
         title_v.addWidget(lbl_title)
         title_v.addWidget(lbl_subtitle)
         banner_layout.addLayout(title_v)
+        right_lbl = QLabel("Servis")
+        right_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 700; border: none; background: transparent;")
         banner_layout.addStretch()
+        banner_layout.addWidget(right_lbl)
         
         cl.addWidget(banner)
         
@@ -8176,39 +9916,62 @@ exit
         service_layout = QHBoxLayout()
         service_layout.setSpacing(15)
         
-        srv_lbl = QLabel("Çeviri Servisi:")
-        srv_lbl.setStyleSheet("color: #e8edf2; font-weight: bold;")
+        srv_lbl = QLabel("Servis")
+        srv_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 700;")
         
         self.trans_service_combo = QComboBox()
-        self.trans_service_combo.addItems(["Google Translate (Ücretsiz)", "DeepL API (Resmi)", "Gemini Flash (API Key)"])
-        self.trans_service_combo.setFixedSize(250, 40)
+        self.trans_service_combo.addItems(["Google Translate (Ücretsiz)", "DeepL API (Resmi)", "Gemini Flash (API Key)", "Yerel AI (Llama-3.1) - ÇOK KALİTELİ"])
+        self.trans_service_combo.setMinimumHeight(38)
         self.trans_service_combo.setCursor(Qt.PointingHandCursor)
-        self.trans_service_combo.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; padding: 5px; font-weight: 500; } QComboBox::drop-down { border: none; } QComboBox::down-arrow { image: none; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 5px solid #6c8eff; margin-right: 10px; }")
+        self.trans_service_combo.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 7px; padding: 7px 12px; font-weight: 600; } QComboBox:hover { border-color: #6c8eff; } QComboBox::drop-down { border: none; width: 24px; } QComboBox::down-arrow { image: none; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #6c8eff; margin-right: 8px; }")
         
         service_layout.addWidget(srv_lbl)
         service_layout.addWidget(self.trans_service_combo)
         
         service_layout.addSpacing(20)
         
+        # --- OYUN DİLİ (KAYNAK DİL) SEÇİMİ ---
+        source_lang_lbl = QLabel("Oyun Dili")
+        source_lang_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 700;")
+        
+        self.combo_source_lang = QComboBox()
+        self.combo_source_lang.setMinimumHeight(38)
+        self.combo_source_lang.setCursor(Qt.PointingHandCursor)
+        self.combo_source_lang.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 7px; padding: 7px 12px; font-weight: 600; } QComboBox:hover { border-color: #6c8eff; } QComboBox::drop-down { border: none; width: 24px; } QComboBox::down-arrow { image: none; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #6c8eff; margin-right: 8px; }")
+        
+        self.combo_source_lang.addItem("EN İngilizce", "en")
+        self.combo_source_lang.addItem("ZH Çince", "zh")
+        self.combo_source_lang.addItem("JA Japonca", "ja")
+        self.combo_source_lang.addItem("KO Korece", "ko")
+        self.combo_source_lang.addItem("RU Rusça", "ru")
+        self.combo_source_lang.addItem("FR Fransızca", "fr")
+        self.combo_source_lang.addItem("DE Almanca", "de")
+        self.combo_source_lang.addItem("ES İspanyolca", "es")
+        
+        service_layout.addWidget(source_lang_lbl)
+        service_layout.addWidget(self.combo_source_lang)
+        
+        service_layout.addSpacing(10)
+
         # --- HEDEF DİL SEÇİMİ (YENİ) ---
-        lang_lbl = QLabel("Hedef Dil:")
-        lang_lbl.setStyleSheet("color: #e8edf2; font-weight: bold;")
+        lang_lbl = QLabel("Hedef dil")
+        lang_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 700;")
         
         self.combo_target_lang = QComboBox()
-        self.combo_target_lang.setFixedSize(200, 40)
+        self.combo_target_lang.setMinimumHeight(38)
         self.combo_target_lang.setCursor(Qt.PointingHandCursor)
-        self.combo_target_lang.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; padding: 5px; font-weight: 500; } QComboBox::drop-down { border: none; } QComboBox::down-arrow { image: none; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 5px solid #6c8eff; margin-right: 10px; }")
+        self.combo_target_lang.setStyleSheet("QComboBox { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 7px; padding: 7px 12px; font-weight: 600; } QComboBox:hover { border-color: #6c8eff; } QComboBox::drop-down { border: none; width: 24px; } QComboBox::down-arrow { image: none; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #6c8eff; margin-right: 8px; }")
         
         # Diller: Türkçe (Default), Rusça, vb.
-        self.combo_target_lang.addItem("🇹🇷 Türkçe (Varsayılan)", "tr")
-        self.combo_target_lang.addItem("🇷🇺 Rusça (Pусский)", "ru")
-        self.combo_target_lang.addItem("🇧🇷 Portekizce (Brezilya)", "pt")
-        self.combo_target_lang.addItem("🇪🇸 İspanyolca (LATAM)", "es")
-        self.combo_target_lang.addItem("🇮🇩 Endonezce (Bahasa)", "id")
-        self.combo_target_lang.addItem("🇵🇱 Lehçe (Polski)", "pl")
-        self.combo_target_lang.addItem("🇩🇪 Almanca (Deutsch)", "de")
-        self.combo_target_lang.addItem("🇫🇷 Fransızca (Français)", "fr")
-        self.combo_target_lang.addItem("🇮🇹 İtalyanca (Italiano)", "it")
+        self.combo_target_lang.addItem("TR Türkçe", "tr")
+        self.combo_target_lang.addItem("RU Rusça", "ru")
+        self.combo_target_lang.addItem("PT Portekizce (Brezilya)", "pt")
+        self.combo_target_lang.addItem("ES İspanyolca (LATAM)", "es")
+        self.combo_target_lang.addItem("ID Endonezce", "id")
+        self.combo_target_lang.addItem("PL Lehçe", "pl")
+        self.combo_target_lang.addItem("DE Almanca", "de")
+        self.combo_target_lang.addItem("FR Fransızca", "fr")
+        self.combo_target_lang.addItem("IT İtalyanca", "it")
         
         
         # Dil değişince tabloyu güncelle (Dinamik)
@@ -8235,44 +9998,41 @@ exit
         speed_layout = QHBoxLayout()
         speed_layout.setSpacing(15)
         
-        speed_lbl = QLabel("Çeviri Hızı (İşçi):")
-        speed_lbl.setStyleSheet("color: #e8edf2; font-weight: bold;")
+        speed_lbl = QLabel("Hız")
+        speed_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; font-weight: 700;")
         
         self.speed_slider = QSlider(Qt.Horizontal)
         self.speed_slider.setMinimum(1)
         self.speed_slider.setMaximum(30)
         self.speed_slider.setValue(10) # Varsayılan: Turbo (10)
-        self.speed_slider.setFixedSize(200, 20)
+        self.speed_slider.setFixedSize(170, 20)
         self.speed_slider.setCursor(Qt.PointingHandCursor)
         self.speed_slider.setStyleSheet("""
-            QSlider::groove:horizontal { border-radius: 4px; height: 8px; background: #2d3748; }
-            QSlider::handle:horizontal { background: #6c8eff; border: 2px solid #6c8eff; width: 16px; height: 16px; margin: -4px 0; border-radius: 8px; }
-            QSlider::handle:horizontal:hover { background: #ffffff; }
+            QSlider::groove:horizontal { border-radius: 4px; height: 6px; background: #2d3748; }
+            QSlider::handle:horizontal { background: #6c8eff; border: 1px solid #89a2ff; width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; }
+            QSlider::handle:horizontal:hover { background: #8ea8ff; }
         """)
         
-        self.speed_val_lbl = QLabel("10 (Turbo 🚀)")
-        self.speed_val_lbl.setFixedWidth(120)
+        self.speed_val_lbl = QLabel("10")
+        self.speed_val_lbl.setFixedWidth(34)
         self.speed_val_lbl.setCursor(Qt.PointingHandCursor) # Mouse üzerine gelince el işareti
-        self.speed_val_lbl.setStyleSheet("color: #6c8eff; font-weight: bold;")
+        self.speed_val_lbl.setAlignment(Qt.AlignCenter)
+        self.speed_val_lbl.setStyleSheet("background-color: #6c8eff; color: #ffffff; font-weight: 700; border-radius: 9px; padding: 2px 6px;")
         
-        self.speed_warning_lbl = QLabel("⚠️ Yüksek Ban Riski!")
-        self.speed_warning_lbl.setStyleSheet("color: #e53e3e; font-weight: bold; font-size: 12px;")
+        self.speed_warning_lbl = QLabel("Yüksek Ban Riski!")
+        self.speed_warning_lbl.setStyleSheet("color: #ff7a67; font-weight: 700; font-size: 11px;")
         self.speed_warning_lbl.setVisible(False)
         
         def on_speed_change(val):
-            mode = "Normal"
-            if val >= 10: mode = "Turbo 🚀"
-            if val >= 20: mode = "EXTREME 🔥"
-            
-            self.speed_val_lbl.setText(f"{val} ({mode})")
+            self.speed_val_lbl.setText(str(val))
             
             # Uyarı kontrolü
             if val >= 20:
                 self.speed_warning_lbl.setVisible(True)
-                self.speed_val_lbl.setStyleSheet("color: #e53e3e; font-weight: bold;")
+                self.speed_val_lbl.setStyleSheet("background-color: #8b2a2a; color: #fff1f1; font-weight: 700; border-radius: 9px; padding: 2px 6px;")
             else:
                 self.speed_warning_lbl.setVisible(False)
-                self.speed_val_lbl.setStyleSheet("color: #6c8eff; font-weight: bold;")
+                self.speed_val_lbl.setStyleSheet("background-color: #6c8eff; color: #ffffff; font-weight: 700; border-radius: 9px; padding: 2px 6px;")
                 
             # Ayarı kaydet (opsiyonel)
             self.settings["translation_speed"] = val
@@ -8292,24 +10052,24 @@ exit
         cl.addLayout(speed_layout)
         saved_srv = self.settings.get("translator_service", "google")
         
-        self.deepl_usage_box = QGroupBox("DeepL Kullanım Durumu")
+        self.deepl_usage_box = QGroupBox("DeepL kullanım durumu")
         self.deepl_usage_box.setVisible(saved_srv == "deepl")
-        self.deepl_usage_box.setStyleSheet("QGroupBox { color: #e8edf2; font-weight: bold; border: 1px solid #2d3748; border-radius: 8px; margin-top: 10px; padding-top: 20px; background-color: #161b22; }")
+        self.deepl_usage_box.setStyleSheet("QGroupBox { color: #e8edf2; font-weight: 700; font-size: 12px; border: 1px solid #2d3748; border-radius: 8px; margin-top: 8px; padding-top: 14px; background-color: #1a1f2e; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #94a3b8; }")
         du_layout = QHBoxLayout()
         du_layout.setContentsMargins(15, 15, 15, 15)
         
         self.dl_progress = QProgressBar()
-        self.dl_progress.setFixedHeight(20)
+        self.dl_progress.setFixedHeight(16)
         self.dl_progress.setTextVisible(True)
-        self.dl_progress.setStyleSheet("QProgressBar { border: 1px solid #2d3748; border-radius: 4px; text-align: center; color: white; background-color: #1a1f2e; } QProgressBar::chunk { background-color: #3b82f6; border-radius: 4px; }")
+        self.dl_progress.setStyleSheet("QProgressBar { border: 1px solid #2d3748; border-radius: 4px; text-align: center; color: white; background-color: #0f1419; } QProgressBar::chunk { background-color: #6c8eff; border-radius: 4px; }")
         
         self.dl_status_lbl = QLabel("Bilgi bekleniyor...")
-        self.dl_status_lbl.setStyleSheet("color: #9ca3af; font-size: 13px; margin-left: 10px;")
+        self.dl_status_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; margin-left: 10px;")
         
         self.dl_refresh_btn = QPushButton("Yenile")
         self.dl_refresh_btn.setFixedSize(80, 30)
         self.dl_refresh_btn.setCursor(Qt.PointingHandCursor)
-        self.dl_refresh_btn.setStyleSheet("QPushButton { background-color: #374151; color: white; border-radius: 4px; } QPushButton:hover { background-color: #4b5563; }")
+        self.dl_refresh_btn.setStyleSheet("QPushButton { background-color: #2d3748; color: #e8edf2; border: 1px solid #3a455e; border-radius: 5px; font-weight: 600; } QPushButton:hover { background-color: #3a455e; }")
         self.dl_refresh_btn.clicked.connect(self.check_deepl_usage)
         
         du_layout.addWidget(self.dl_progress)
@@ -8321,50 +10081,47 @@ exit
         
         # Seçim değişince ayarı kaydet ve UI güncelle
         def on_service_change(idx):
-            if idx == 0:
-                srv = "google"
-            elif idx == 1:
-                srv = "deepl"
-            else:
-                srv = "gemini"
+            if idx == 0: srv = "google"
+            elif idx == 1: srv = "deepl"
+            elif idx == 2: srv = "gemini"
+            elif idx == 3: srv = "local_ai"
+            else: srv = "google"
                 
             self.settings["translator_service"] = srv
             self.save_settings()
+            
+            # [YENİ] Yerel AI Model Kontrolü
+            if srv == "local_ai":
+                self.check_local_ai_model()
+                
             # DeepL panelini göster/gizle
             self.deepl_usage_box.setVisible(srv == "deepl")
             if srv == "deepl":
                 self.check_deepl_usage()
         
-        self.trans_service_combo.currentIndexChanged.connect(on_service_change)
-        
-        # Varsayılanı yükle
+        # Varsayılanı yükle (sinyal bağlanmadan ÖNCE ayarla, böylece sayfa açılışında tetiklenmez)
         idx = 0
-        if saved_srv == "deepl":
-            idx = 1
-        elif saved_srv == "gemini":
-            idx = 2
+        if saved_srv == "deepl": idx = 1
+        elif saved_srv == "gemini": idx = 2
+        elif saved_srv == "local_ai": idx = 3
         self.trans_service_combo.setCurrentIndex(idx)
+        
+        # Şimdi sinyali bağla (artık sadece kullanıcı değiştirince tetiklenir)
+        self.trans_service_combo.currentIndexChanged.connect(on_service_change)
 
-        # Başlangıçta DeepL seçiliyse kontrol et
+        # Başlangıçta DeepL seçiliyse kullanım bilgisini göster
         if saved_srv == "deepl":
-            # QTimer singleShot ile UI yüklendikten hemen sonra çağır
             QTimer.singleShot(500, self.check_deepl_usage)
-
-        if saved_srv == "deepl":
-            # QTimer singleShot ile UI yüklendikten hemen sonra çağır
-            QTimer.singleShot(500, self.check_deepl_usage)
-
-
 
         # ÜST KISIM: OYUN LİSTESİ
-        list_group = QGroupBox("Bulunan Oyunlar")
-        list_group.setStyleSheet("QGroupBox { color: " + self.accent_color + "; font-weight: bold; font-size: 14px; border: 2px solid #2d3748; border-radius: 8px; padding-top: 15px; background-color: #141823; }")
+        list_group = QGroupBox("BULUNAN OYUNLAR")
+        list_group.setStyleSheet("QGroupBox { color: #e8edf2; font-weight: 700; font-size: 12px; border: 1px solid #2d3748; border-radius: 8px; padding-top: 14px; background-color: #1a1f2e; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #94a3b8; }")
         list_layout = QVBoxLayout()
         
         # Tablo
         self.game_table = QTableWidget()
         self.game_table.setColumnCount(5)
-        self.game_table.setHorizontalHeaderLabels(["", "Oyun Adı", "", "Motor", "Platform"])
+        self.game_table.setHorizontalHeaderLabels(["", "Oyun adı", "", "Motor", "Platform"])
         self.game_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch) # İsim esnek
         self.game_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents) # Durum ikonu küçük
         self.game_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents) # Motor sığdır
@@ -8374,7 +10131,7 @@ exit
         self.game_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.game_table.verticalHeader().setVisible(False)
         self.game_table.setAlternatingRowColors(True)
-        self.game_table.setStyleSheet("QTableWidget { background-color: #0f1419; alternate-background-color: #161b22; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; gridline-color: transparent; } QTableWidget::item { padding: 8px; border-bottom: 1px solid #2d3748; } QTableWidget::item:selected { background-color: #3b82f6; color: white; } QTableWidget::item:hover { background-color: #2d3748; } QHeaderView::section { background-color: #1a1f2e; color: #9ca3af; padding: 8px; border: none; font-weight: bold; border-bottom: 2px solid #2d3748; }")
+        self.game_table.setStyleSheet("QTableWidget { background-color: #0f1419; alternate-background-color: #161b22; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; gridline-color: #2d3748; selection-background-color: #2f4f85; } QTableWidget::item { padding: 6px; border-bottom: 1px solid #2d3748; } QTableWidget::item:selected { color: #ffffff; } QHeaderView::section { background-color: #1a1f2e; color: #94a3b8; padding: 7px; border: none; border-bottom: 1px solid #2d3748; font-weight: 700; }")
         # Sütun genişlikleri
         self.game_table.setColumnWidth(0, 40) # İkon
         self.game_table.setColumnWidth(2, 80) # Motor
@@ -8386,35 +10143,43 @@ exit
         # Alt Butonlar (Tara, Manuel)
         btn_layout = QHBoxLayout()
         
-        self.scan_btn = QPushButton("🔍  Oyunları Tara")
+        self.scan_btn = QPushButton("🔎 Tara")
         self.scan_btn.setCursor(Qt.PointingHandCursor)
-        self.scan_btn.setStyleSheet("QPushButton { background-color: #4b5563; color: white; padding: 10px 20px; border-radius: 6px; font-weight: bold; } QPushButton:hover { background-color: #6b7280; }")
+        self.scan_btn.setStyleSheet("QPushButton { background-color: #2d3748; color: #e8edf2; border: 1px solid #3a455e; padding: 10px 14px; border-radius: 8px; font-weight: 700; } QPushButton:hover { background-color: #3a455e; }")
         self.scan_btn.clicked.connect(self.scan_games)
         
-        self.manual_btn = QPushButton("📁  Manuel Ekle")
+        self.manual_btn = QPushButton("📁 Manuel ekle")
         self.manual_btn.setCursor(Qt.PointingHandCursor)
-        self.manual_btn.setStyleSheet("QPushButton { background-color: #374151; color: white; padding: 10px 20px; border-radius: 6px; font-weight: bold; } QPushButton:hover { background-color: #4b5563; }")
+        self.manual_btn.setStyleSheet("QPushButton { background-color: #2d3748; color: #e8edf2; border: 1px solid #3a455e; padding: 10px 14px; border-radius: 8px; font-weight: 700; } QPushButton:hover { background-color: #3a455e; }")
         self.manual_btn.clicked.connect(self.manual_add_game)
         
+        self.unity_tam_ceviri_btn = QPushButton("UNITY TAM ÇEVİRİ")
+        self.unity_tam_ceviri_btn.setCursor(Qt.PointingHandCursor)
+        self.unity_tam_ceviri_btn.setStyleSheet("QPushButton { background-color: #0f766e; color: #ffffff; border: 1px solid #0d9488; padding: 10px 14px; border-radius: 8px; font-weight: 700; } QPushButton:hover { background-color: #115e59; }")
+        self.unity_tam_ceviri_btn.setVisible(False)
+        self.unity_tam_ceviri_btn.clicked.connect(self.start_unity_scan)
+        
+        self.unity_oto_ceviri_btn = QPushButton("UNITY OTO ÇEVİRİ")
+        self.unity_oto_ceviri_btn.setCursor(Qt.PointingHandCursor)
+        self.unity_oto_ceviri_btn.setStyleSheet("QPushButton { background-color: #6366f1; color: #ffffff; border: 1px solid #4f46e5; padding: 10px 14px; border-radius: 8px; font-weight: 700; } QPushButton:hover { background-color: #4f46e5; }")
+        self.unity_oto_ceviri_btn.setVisible(False)
+        self.unity_oto_ceviri_btn.clicked.connect(self.start_unity_oto_ceviri)
+
         btn_layout.addWidget(self.scan_btn)
         btn_layout.addWidget(self.manual_btn)
+        btn_layout.addWidget(self.unity_tam_ceviri_btn)
+        btn_layout.addWidget(self.unity_oto_ceviri_btn)
         btn_layout.addStretch()
         
         # KURULUM BUTONU (ORTA BÜYÜK)
-        self.install_btn = QPushButton("ÇEVİRİ YAP")
+        self.install_btn = QPushButton("Çeviriyi başlat ➜")
         self.install_btn.setEnabled(False) # Seçim yokken pasif
         self.install_btn.setFixedHeight(50)
         self.install_btn.setCursor(Qt.PointingHandCursor)
-        self.install_btn.setStyleSheet("QPushButton { background-color: " + self.accent_color + "; color: white; font-size: 16px; font-weight: bold; border-radius: 8px; } QPushButton:hover { background-color: #5a7de8; } QPushButton:disabled { background-color: #2d3748; color: #64748b; }")
+        self.install_btn.setStyleSheet("QPushButton { background-color: #6c8eff; color: #ffffff; font-size: 16px; font-weight: 800; border: 1px solid #7f9cff; border-radius: 8px; padding: 6px 16px; } QPushButton:hover { background-color: #5a7de8; } QPushButton:disabled { background-color: #2d3748; color: #64748b; border: 1px solid #3a455e; }")
         self.install_btn.clicked.connect(self.install_selected_game)
         
-
-        
         list_layout.addLayout(btn_layout)
-        
-        # [YENİ] Canlı Temizleyici Checkbox
-        # [YENİ] Manuel Düzelt Butonu (Checkbox yerine) - KALDIRILDI
-        # Kullanıcı isteği: Bu özellik Ayarlar -> Kaydet içine taşındı.
         
         # [YENİ] Ana Aksiyon Butonları (Çeviri + Başlat)
         action_layout = QHBoxLayout()
@@ -8422,19 +10187,14 @@ exit
         
         action_layout.addWidget(self.install_btn, stretch=3) # Çeviri butonu daha geniş
         
-        # Temizle butonu kaldırıldı - Artık Unity çeviri penceresinde (🗑️ Temizle)
-        # action_layout.addWidget(self.settings_btn, stretch=1) # Silindi
-        
         list_layout.addLayout(action_layout)
         
         list_group.setLayout(list_layout)
-        list_group.setLayout(list_layout)
-        cl.addWidget(list_group, stretch=1) # Tablo alanı genişlesin
 
         # [YENİ] PAK ANALİZ PENCERESİ (GÖMÜLÜ)
-        self.pak_analysis_group = QGroupBox("Oyun Dosya Yapısı (PAK)")
-        self.pak_analysis_group.setVisible(False) # Sadece Unreal oyunlarında açılacak
-        self.pak_analysis_group.setStyleSheet("QGroupBox { color: " + self.accent_color + "; font-weight: bold; font-size: 14px; border: 2px solid #2d3748; border-radius: 8px; padding-top: 15px; background-color: #141823; }")
+        self.pak_analysis_group = QGroupBox("PAK DOSYALARI")
+        self.pak_analysis_group.setVisible(True) # Panel yerleşimi sabit kalsın
+        self.pak_analysis_group.setStyleSheet("QGroupBox { color: #e8edf2; font-weight: 700; font-size: 12px; border: 1px solid #2d3748; border-radius: 8px; padding-top: 14px; background-color: #1a1f2e; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #94a3b8; }")
         
         pak_layout = QVBoxLayout()
         splitter = QSplitter(Qt.Horizontal)
@@ -8445,11 +10205,11 @@ exit
         left_widget = QWidget()
         l_layout = QVBoxLayout(left_widget)
         l_layout.setContentsMargins(0,0,5,0)
-        l_layout.addWidget(QLabel("PAK Dosyaları (Öncelikli)"))
+        l_layout.addWidget(QLabel("PAK dosyaları"))
         
         self.pak_table = QTableWidget()
         self.pak_table.setColumnCount(3)
-        self.pak_table.setHorizontalHeaderLabels(["PAK Adı", "Ver.", "AES"])
+        self.pak_table.setHorizontalHeaderLabels(["PAK adı", "Ver.", "AES"])
         self.pak_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.pak_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.pak_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -8457,7 +10217,7 @@ exit
         self.pak_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.pak_table.itemSelectionChanged.connect(self.on_pak_table_selected)
         self.pak_table.cellClicked.connect(lambda r, c: self.on_pak_table_selected())
-        self.pak_table.setStyleSheet("QTableWidget { background-color: #0f1419; color: #e8edf2; border: 1px solid #2d3748; }")
+        self.pak_table.setStyleSheet("QTableWidget { background-color: #0f1419; color: #e8edf2; border: 1px solid #2d3748; selection-background-color: #2f4f85; } QTableWidget::item { padding: 6px; border-bottom: 1px solid #2d3748; } QHeaderView::section { background-color: #1a1f2e; color: #94a3b8; padding: 7px; border: none; border-bottom: 1px solid #2d3748; font-weight: 700; }")
         l_layout.addWidget(self.pak_table)
         splitter.addWidget(left_widget)
         
@@ -8465,7 +10225,7 @@ exit
         right_widget = QWidget()
         r_layout = QVBoxLayout(right_widget)
         r_layout.setContentsMargins(5,0,0,0)
-        r_layout.addWidget(QLabel("İçerik (Dil Dosyaları)"))
+        r_layout.addWidget(QLabel("İçerik - dil dosyaları"))
         
         self.pak_content_table = QTableWidget()
         self.pak_content_table.setColumnCount(2)
@@ -8474,43 +10234,56 @@ exit
         self.pak_content_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.pak_content_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.pak_content_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.pak_content_table.setStyleSheet("QTableWidget { background-color: #0f1419; color: #e8edf2; border: 1px solid #2d3748; }")
+        self.pak_content_table.setStyleSheet("QTableWidget { background-color: #0f1419; color: #e8edf2; border: 1px solid #2d3748; selection-background-color: #2f4f85; } QTableWidget::item { padding: 6px; border-bottom: 1px solid #2d3748; } QHeaderView::section { background-color: #1a1f2e; color: #94a3b8; padding: 7px; border: none; border-bottom: 1px solid #2d3748; font-weight: 700; }")
+        self.pak_content_table.itemSelectionChanged.connect(self.on_pak_content_table_selected)
         r_layout.addWidget(self.pak_content_table)
-        splitter.addWidget(right_widget)
         
+        self.unity_text_preview = QTextEdit()
+        self.unity_text_preview.setReadOnly(True)
+        self.unity_text_preview.setStyleSheet("QTextEdit { background-color: #0f1419; color: #a5b4fc; border: 1px solid #2d3748; padding: 5px; font-family: 'Consolas', monospace; font-size: 11px; }")
+        self.unity_text_preview.setVisible(False)
+        r_layout.addWidget(self.unity_text_preview)
+        
+        splitter.addWidget(right_widget)
         splitter.setSizes([400, 400])
         pak_layout.addWidget(splitter)
         
         # Analiz Butonu
-        self.btn_analyze_pak = QPushButton("📂 Seçili Pak Tara")
-        self.btn_analyze_pak.setStyleSheet("background-color: #4b5563; color: white; padding: 5px;")
-        self.btn_analyze_pak.clicked.connect(self.on_pak_table_selected)
+        self.btn_analyze_pak = QPushButton("Seçili pakı tara")
+        self.btn_analyze_pak.setStyleSheet("QPushButton { background-color: #2d3748; color: #e8edf2; border: 1px solid #3a455e; border-radius: 6px; padding: 7px 10px; font-weight: 700; } QPushButton:hover { background-color: #3a455e; }")
+        self.btn_analyze_pak.clicked.connect(self.on_btn_analyze_pak_clicked)
         pak_layout.addWidget(self.btn_analyze_pak)
         
         self.pak_analysis_group.setLayout(pak_layout)
-        cl.addWidget(self.pak_analysis_group, stretch=2)
+
+        # Üst satır: Sol Oyunlar + Sağ PAK/İçerik
+        top_row = QHBoxLayout()
+        top_row.setSpacing(10)
+        top_row.addWidget(list_group)
+        top_row.addWidget(self.pak_analysis_group)
+        top_row.setStretch(0, 34)
+        top_row.setStretch(1, 66)
+        cl.addLayout(top_row, stretch=1)
         
         # ALT KISIM: LOG VE İŞLEM DURUMU
-        self.trans_log_group = QGroupBox("İşlem Detayları")
-        # Log grubu artık hep görünür olabilir veya işlem başlayınca görünür
+        self.trans_log_group = QGroupBox("İŞLEM GÜNLÜĞÜ")
         self.trans_log_group.setVisible(True) 
         self.trans_log_group.setFixedHeight(220) # Sabit yükseklik
-        self.trans_log_group.setStyleSheet("QGroupBox { color: " + self.accent_color + "; font-weight: bold; font-size: 13px; border: 1px solid #2d3748; border-radius: 8px; padding-top: 15px; background-color: #141823; }")
+        self.trans_log_group.setStyleSheet("QGroupBox { color: #e8edf2; font-weight: 700; font-size: 12px; border: 1px solid #2d3748; border-radius: 8px; padding-top: 14px; background-color: #1a1f2e; } QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #94a3b8; }")
         
         log_layout = QVBoxLayout()
         log_layout.setSpacing(10)
         
         self.trans_log_list = QListWidget()
-        self.trans_log_list.setStyleSheet("QListWidget { background-color: #0f1419; color: #9ca3af; border: 1px solid #2d3748; border-radius: 6px; font-family: 'Consolas', monospace; font-size: 11px; padding: 5px; } QListWidget::item { padding: 3px; }")
+        self.trans_log_list.setStyleSheet("QListWidget { background-color: #0f1419; color: #9ca3af; border: 1px solid #2d3748; border-radius: 6px; font-family: 'Consolas', monospace; font-size: 11px; padding: 4px; } QListWidget::item { padding: 2px; }")
         log_layout.addWidget(self.trans_log_list)
         
         # Progress Bar
         self.trans_progress = QProgressBar()
         self.trans_progress.setFixedHeight(8)
         self.trans_progress.setTextVisible(False)
-        self.trans_progress.setStyleSheet("QProgressBar { border: none; background-color: #2d3748; border-radius: 4px; } QProgressBar::chunk { background-color: #10b981; border-radius: 4px; }")
+        self.trans_progress.setStyleSheet("QProgressBar { border: none; background-color: #2d3748; border-radius: 4px; } QProgressBar::chunk { background-color: #6c8eff; border-radius: 4px; }")
         log_layout.addWidget(self.trans_progress)
-        
         # Status Label + Hourglass
         status_row = QHBoxLayout()
         self.hourglass_lbl = QLabel("⏳")
@@ -8518,7 +10291,7 @@ exit
         self.hourglass_lbl.setStyleSheet("font-size: 20px;")
         
         self.trans_status_lbl = QLabel("Hazır")
-        self.trans_status_lbl.setStyleSheet("color: #9ca3af; font-weight: bold; font-size: 12px;")
+        self.trans_status_lbl.setStyleSheet("color: #94a3b8; font-weight: 700; font-size: 12px;")
         
         status_row.addWidget(self.hourglass_lbl)
         status_row.addWidget(self.trans_status_lbl)
@@ -8534,33 +10307,20 @@ exit
         self.hourglass_timer.timeout.connect(self.animate_hourglass)
         self.hourglass_angle = 0
         
+
+        
         page.setLayout(main_layout)
         main_layout.addWidget(content_widget)
         self.stack.addWidget(page)
         
-        # DEBUG: Geçici devre dışı - crash testi
-        # QTimer.singleShot(100, self.load_cached_games_to_translator)
-
-    
-    def open_translator_settings(self):
-        """Çeviri Ayarları Penceresini Aç"""
-        if not hasattr(self, 'current_game_data') or not self.current_game_data:
-            QMessageBox.warning(self, "Uyarı", "Lütfen önce listeden bir oyun seçin.")
-            return
-            
-        try:
-            from gui.dialogs import TranslatorSettingsDialog
-            dlg = TranslatorSettingsDialog(self.current_game_data, self)
-            dlg.exec_()
-        except ImportError as e:
-            QMessageBox.critical(self, "Hata", f"Ayarlar penceresi açılamadı: {e}")
-
-
-
+        # Açılışta kütüphane/cached oyunları otomatik yükle.
+        # Cache boşsa load_cached_games_to_translator içinde otomatik taramaya düşer.
+        QTimer.singleShot(900, self.load_cached_games_to_translator)
     def apply_turkish_filter(self):
         """Mek/mak eklerini temizle (Unity)"""
-        if not self.current_game_data:
+        if not hasattr(self, 'current_game_data') or not self.current_game_data:
             return
+
             
         game_path = self.current_game_data['path']
         
@@ -8658,10 +10418,17 @@ exit
              QMessageBox.critical(self, "Hata", f"İşlem başarısız:\n{msg}")
 
     def on_game_selected(self):
+        self._selected_content_file = None
+        self._embedded_aes_key = None
         # Tablodan seçim yapılınca
         selected = self.game_table.selectedItems()
         if not selected:
             return
+
+    
+
+
+
             
         # Unity Kontrolü - Method Seçimini Göster/Gizle
         row = selected[0].row()
@@ -8702,7 +10469,7 @@ exit
              # Otomatik tarama başlat (veya kullanıcı butona basar)
              QTimer.singleShot(200, self.start_embedded_pak_scan)
         elif hasattr(self, 'pak_analysis_group'):
-             self.pak_analysis_group.setVisible(False)
+             self.pak_analysis_group.setVisible(True)
 
         # Buton Görünürlüğünü Güncelle
         self.update_trans_buttons_visibility()
@@ -8715,7 +10482,8 @@ exit
         # Legacy Support
         if hasattr(self, 'install_btn'):
             self.install_btn.setEnabled(True)
-            self.install_btn.setText(f"{name_item.text()} SEÇİLDİ - ÇEVİRİ YAP")
+            self.install_btn.setText("Çeviriyi başlat ➜")
+            self.install_btn.setToolTip(f"Seçili oyun: {name_item.text()}")
 
     def update_trans_buttons_visibility(self):
         """Ayarlar ve Temizle butonlarını duruma göre gizle/göster"""
@@ -8728,19 +10496,12 @@ exit
                 
         if hasattr(self, 'clean_btn'): self.clean_btn.setVisible(show)
         if hasattr(self, 'settings_btn'): self.settings_btn.setVisible(show)
+        if hasattr(self, 'unity_tam_ceviri_btn'): self.unity_tam_ceviri_btn.setVisible(show)
+        if hasattr(self, 'unity_oto_ceviri_btn'): self.unity_oto_ceviri_btn.setVisible(show)
         
         # Cleaner Checkbox (Yeni)
         if hasattr(self, 'cleaner_chk'): 
             self.cleaner_chk.setVisible(show)
-            
-        # Font Fix Button (Yeni)
-        if hasattr(self, 'font_btn'): self.font_btn.setVisible(show)
-        
-        # Cleaner Checkbox (Yeni)
-        if hasattr(self, 'cleaner_chk'): 
-            self.cleaner_chk.setVisible(show)
-            # Eğer görünürse ve checkliyse worker başlat?
-            # Kullanıcı her oyun değiştirdiğinde worker sıfırlanmalı.
             
         # Font Fix Button (Yeni)
         if hasattr(self, 'font_btn'): self.font_btn.setVisible(show)
@@ -8761,8 +10522,14 @@ exit
                 self.on_scan_completed(games, save_cache=False)
                 self.trans_status_lbl.setText(f"✅ {len(games)} oyun önbellekten yüklendi")
             else:
-                # Önbellek boşsa kullanıcıya bilgi ver
-                self.trans_status_lbl.setText("ℹ️ Oyun bulunamadı. 'Oyunları Tara' butonuna basın.")
+                # Önbellek boşsa kütüphanedeki davranış gibi otomatik taramaya düş.
+                # Tekrarlı tetiklemeyi engelle.
+                if not getattr(self, "_translator_autoscan_triggered", False):
+                    self._translator_autoscan_triggered = True
+                    self.trans_status_lbl.setText("ℹ️ Önbellek boş. Otomatik tarama başlatılıyor...")
+                    QTimer.singleShot(250, self.scan_games)
+                else:
+                    self.trans_status_lbl.setText("ℹ️ Oyun bulunamadı. 'Oyunları Tara' butonuna basın.")
         except Exception as e:
             print(f"Önbellek yükleme hatası: {e}")
             self.trans_status_lbl.setText("⚠️ Oyunlar yüklenemedi")
@@ -8815,9 +10582,7 @@ exit
         except:
             return False
 
-
     def scan_games(self):
-
         # Oyun taramasını başlat (Thread ile yapılmalı aslında ama şimdilik senkron deneyelim veya kısa sürerse)
         self.trans_status_lbl.setText("Oyunlar taranıyor, lütfen bekleyin...")
         self.hourglass_lbl.setVisible(True)
@@ -8832,7 +10597,500 @@ exit
         self.scanner_thread.finished.connect(self.on_scan_completed)
         self.scanner_thread.progress.connect(lambda msg: self.trans_status_lbl.setText(msg))
         self.scanner_thread.start()
+
+    def start_unity_oto_ceviri(self):
+        self._unity_full_trans_mode = False
+        self.install_selected_game()
+
+    def start_unity_scan(self):
+        if not hasattr(self, 'current_game_data') or not self.current_game_data:
+            return
+            
+        try:
+            import sys
+            import os
+            if 'unity' not in sys.path:
+                sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unity'))
+            from unity.asset_viewer import FolderScannerWorker
+        except ImportError as e:
+            if hasattr(self, 'trans_log_list'):
+                self.trans_log_list.addItem(f"❌ Unity tarayıcı modülü bulunamadı: {e}")
+                self.trans_log_list.scrollToBottom()
+            return
+
+        game_path = self.current_game_data.get('path', '')
+        if game_path and os.path.isfile(game_path):
+            game_path = os.path.dirname(game_path)
+            
+        if not game_path or not os.path.isdir(game_path):
+            if hasattr(self, 'trans_log_list'):
+                self.trans_log_list.addItem("❌ Geçerli bir oyun klasörü bulunamadı.")
+                self.trans_log_list.scrollToBottom()
+            return
+
+        if hasattr(self, 'trans_log_list'):
+            self.trans_log_list.addItem("🔍 Unity akıllı tarama başlatılıyor...")
+            self.trans_log_list.scrollToBottom()
+            
+        self.unity_tam_ceviri_btn.setEnabled(False)
+        self._unity_full_trans_mode = True
         
+        self.unity_scanner_worker = FolderScannerWorker(game_path)
+        self.unity_scanner_worker.progress.connect(lambda msg: (self.trans_log_list.addItem(msg), self.trans_log_list.scrollToBottom()) if hasattr(self, 'trans_log_list') else None)
+        self.unity_scanner_worker.finished.connect(self.on_unity_scan_finished)
+        self.unity_scanner_worker.start()
+
+    def on_unity_scan_finished(self, found_files):
+        self.unity_tam_ceviri_btn.setEnabled(True)
+        if hasattr(self, 'trans_log_list'):
+            self.trans_log_list.addItem(f"✅ Tarama tamamlandı. {len(found_files)} adet potansiyel dosya bulundu.")
+            self.trans_log_list.scrollToBottom()
+        
+        self.pak_table.setRowCount(0)
+        self.pak_table.setColumnCount(3)
+        self.pak_table.setHorizontalHeaderLabels(["Dosya Adı", "Boyut (KB)", "Sebep"])
+        
+        if not found_files:
+            return
+            
+        self.pak_table.setRowCount(len(found_files))
+        import os
+        
+        for i, (file_path, size, reason) in enumerate(found_files):
+            name_item = QTableWidgetItem(os.path.basename(file_path))
+            name_item.setData(Qt.UserRole, file_path)
+            
+            size_kb = f"{size / 1024:.1f} KB"
+            size_item = QTableWidgetItem(size_kb)
+            
+            reason_item = QTableWidgetItem(reason)
+            
+            self.pak_table.setItem(i, 0, name_item)
+            self.pak_table.setItem(i, 1, size_item)
+            self.pak_table.setItem(i, 2, reason_item)
+            
+        # İlk dosyayı otomatik seç
+        if len(found_files) > 0:
+            self.pak_table.selectRow(0)
+
+    def show_unity_pak_content(self, file_path):
+        self.current_unity_assets_path = file_path
+        self.pak_content_table.setRowCount(0)
+        self.pak_content_table.setColumnCount(3)
+        self.pak_content_table.setHorizontalHeaderLabels(["İçerik", "Tip", "Durum"])
+        self.unity_text_preview.setVisible(True)
+        self.unity_text_preview.clear()
+        
+        if hasattr(self, 'trans_log_list'):
+            self.trans_log_list.addItem(f"🔍 {os.path.basename(file_path)} içeriği taranıyor...")
+            self.trans_log_list.scrollToBottom()
+            
+        from PyQt5.QtCore import QThread, pyqtSignal
+        class UnityPreviewWorker(QThread):
+            finished = pyqtSignal(list)
+            error = pyqtSignal(str)
+            def __init__(self, path):
+                super().__init__()
+                self.path = path
+            def run(self):
+                try:
+                    import sys
+                    import os
+                    import json
+                    import UnityPy
+                    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unity'))
+                    from asset_viewer import clean_text_strings
+                    
+                    def get_strings(d):
+                        s_list = []
+                        if isinstance(d, dict):
+                            for v in d.values(): s_list.extend(get_strings(v))
+                        elif isinstance(d, list):
+                            for v in d: s_list.extend(get_strings(v))
+                        elif isinstance(d, str): s_list.append(d)
+                        return s_list
+
+                    def has_english_words(text_list):
+                        non_empty = [s for s in text_list if len(s.strip()) > 1]
+                        if not non_empty: return False
+                        joined = " ".join(non_empty).lower()
+                        common_en = ["the ", " and ", " of ", " to ", " you ", " is ", " that ", " it ", " in ", " for "]
+                        return any(w in joined for w in common_en) or len(non_empty) > 10
+
+                    env = UnityPy.load(self.path)
+                    items = []
+                    
+                    for obj in env.objects:
+                        type_str = str(getattr(obj, 'type', ''))
+                        if hasattr(obj.type, 'name'):
+                            type_str = obj.type.name
+                        elif type_str.startswith('ClassIDType.'):
+                            type_str = type_str.split('.')[-1]
+                            
+                        is_loc = False
+                        name = "Bilinmiyor"
+                        
+                        if type_str == "MonoBehaviour":
+                            try:
+                                tree = obj.read_typetree()
+                                if tree:
+                                    tree_str = json.dumps(tree).lower()
+                                    if "i2languages" in tree_str:
+                                        is_loc = True
+                                    else:
+                                        for kw in ["translation", "language", "m_term", "loc_"]:
+                                            if kw in tree_str:
+                                                if has_english_words(get_strings(tree)):
+                                                    is_loc = True
+                                                    break
+                            except:
+                                try:
+                                    raw_data = obj.get_raw_data()
+                                    if b"I2Languages" in raw_data or b"localization" in raw_data:
+                                        is_loc = True
+                                except: pass
+                                
+                        elif type_str == "TextAsset":
+                            try:
+                                tree = obj.read_typetree()
+                                if tree:
+                                    n = tree.get("m_Name", "").lower()
+                                    if any(kw in n for kw in ["loc", "lang", "trans", "string"]):
+                                        st = tree.get("m_Script", "")
+                                        if not st and hasattr(obj, 'read'):
+                                            r = obj.read()
+                                            if hasattr(r, 'text'): st = r.text
+                                        if st and len(st.strip()) > 10 and has_english_words([st]):
+                                            is_loc = True
+                                    elif "i2languages" in n:
+                                        is_loc = True
+                            except: pass
+                            
+                        if is_loc:
+                            try:
+                                tree = obj.read_typetree()
+                                if tree and tree.get("m_Name"): name = tree["m_Name"]
+                                elif tree and tree.get("name"): name = tree["name"]
+                                else:
+                                    r = obj.read()
+                                    if hasattr(r, 'name') and r.name: name = r.name
+                            except: pass
+                            
+                            items.append({"path_id": str(obj.path_id), "type": type_str, "name": name})
+                            
+                    if not items:
+                        items.append({"path_id": "Yok", "type": "Metin", "name": "Bulunamadı (Dil dosyası yok)"})
+                        
+                    self.finished.emit(items)
+                except Exception as e:
+                    self.error.emit(str(e))
+                    
+        self.unity_preview_worker = UnityPreviewWorker(file_path)
+        self.unity_preview_worker.finished.connect(self._on_unity_preview_finished)
+        self.unity_preview_worker.error.connect(lambda e: self.trans_log_list.addItem(f"❌ İçerik okuma hatası: {e}") if hasattr(self, 'trans_log_list') else None)
+        self.unity_preview_worker.start()
+
+    def _on_unity_preview_finished(self, items):
+        self.pak_content_table.setRowCount(len(items))
+        for i, item_data in enumerate(items):
+            if isinstance(item_data, dict):
+                text_to_show = f"{item_data['name']} ({item_data['type']})"
+                path_id = item_data['path_id']
+            else:
+                text_to_show = str(item_data)
+                path_id = "Bilinmiyor"
+                
+            name_item = QTableWidgetItem(text_to_show)
+            name_item.setData(Qt.UserRole, path_id)
+            self.pak_content_table.setItem(i, 0, name_item)
+            self.pak_content_table.setItem(i, 1, QTableWidgetItem("Metin/Veri"))
+            self.pak_content_table.setItem(i, 2, QTableWidgetItem("Hazır"))
+            
+        if self.pak_content_table.rowCount() > 0:
+            self.pak_content_table.selectRow(0)
+
+    def start_unity_translation(self, assets_path):
+        import sys
+        import os
+        import UnityPy
+        sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'unity'))
+        from asset_viewer import unpack_dat, TranslateWorker, I2LanguagesBinaryTranslateWorker, find_list_paths
+        from PyQt5.QtWidgets import QMessageBox
+        
+        rows = self.pak_content_table.selectionModel().selectedRows()
+        if not rows:
+            if self.pak_content_table.rowCount() > 0:
+                self.pak_content_table.selectRow(0)
+                row = 0
+            else:
+                if hasattr(self, 'trans_log_list'): self.trans_log_list.addItem("❌ İçerik tablosundan bir nesne seçilmedi.")
+                return
+        else:
+            row = rows[0].row()
+            
+        path_id_str = self.pak_content_table.item(row, 0).data(Qt.UserRole)
+        if not path_id_str or path_id_str in ["Bilinmiyor", "Yok"]:
+            if hasattr(self, 'trans_log_list'): self.trans_log_list.addItem("❌ Geçerli bir dil nesnesi seçilmedi.")
+            return
+            
+        try:
+            env = UnityPy.load(assets_path)
+            
+            # --- YENİ EKLENEN: Çeviri öncesi tüm Fontları otomatik düzeltme ---
+            font_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools', 'unity_font')
+            font_path = os.path.join(font_dir, 'default.ttf')
+            
+            if os.path.exists(font_path):
+                try:
+                    with open(font_path, "rb") as f:
+                        new_font_bytes = f.read()
+                        
+                    replaced_font_count = 0
+                    for obj in env.objects:
+                        if obj.type.name == "Font":
+                            tree = obj.read_typetree()
+                            if "m_FontData" in tree:
+                                tree["m_FontData"] = list(new_font_bytes)
+                                obj.save_typetree(tree)
+                                replaced_font_count += 1
+                                
+                    if replaced_font_count > 0:
+                        if hasattr(self, 'trans_log_list'): 
+                            self.trans_log_list.addItem(f"✅ Sistem Fontu Gösterildi: {replaced_font_count} adet font Arial ile düzeltildi.")
+                except Exception as font_err:
+                    if hasattr(self, 'trans_log_list'): 
+                        self.trans_log_list.addItem(f"⚠️ Font otomatik düzeltilemedi: {font_err}")
+            else:
+                if hasattr(self, 'trans_log_list'): 
+                    self.trans_log_list.addItem("⚠️ tools/unity_font/default.ttf bulunamadı, font düzeltme atlandı.")
+            # -------------------------------------------------------------------
+            selected_obj = None
+            for obj in env.objects:
+                if str(obj.path_id) == path_id_str:
+                    selected_obj = obj
+                    break
+                    
+            if not selected_obj:
+                if hasattr(self, 'trans_log_list'): self.trans_log_list.addItem("❌ Seçili nesne dosyada bulunamadı.")
+                return
+                
+            try:
+                raw_bytes = selected_obj.get_raw_data()
+            except:
+                raw_bytes = b""
+                
+            is_i2languages = b"I2Languages" in raw_bytes
+            
+            if is_i2languages:
+                try:
+                    i2_tree = unpack_dat(raw_bytes)
+                    english_idx = 0
+                    for idx, lang in enumerate(i2_tree["languages"]):
+                        if "en" in lang['code'].lower() or "english" in lang['name'].lower():
+                            english_idx = idx
+                            break
+                    # Oyunda her zaman varsayılan dil olarak çalışması için
+                    # İngilizce metinlerin yerine doğrudan Türkçe çevirileri yazıyoruz!
+                    tr_idx = english_idx
+                        
+                    worker = I2LanguagesBinaryTranslateWorker(selected_obj, i2_tree, english_idx, tr_idx, True, True, env, assets_path, 4)
+                except Exception as e:
+                    if hasattr(self, 'trans_log_list'): self.trans_log_list.addItem(f"❌ I2Languages verisi okunurken hata oluştu: {e}")
+                    return
+            else:
+                type_str = str(getattr(selected_obj, 'type', ''))
+                if hasattr(selected_obj.type, 'name'): type_str = selected_obj.type.name
+                elif type_str.startswith('ClassIDType.'): type_str = type_str.split('.')[-1]
+                
+                tree = None
+                try:
+                    tree = selected_obj.read_typetree()
+                except: pass
+                
+                if tree and type_str == "TextAsset" and "m_Script" in tree:
+                    # Sadece saf metin olan TextAsset'i çevir, dizileri veya rastgele MonoBehaviour'ları elleme (oyunu bozar)
+                    worker = TranslateWorker(selected_obj, tree, "m_Script", 0, 0, True, True, env, assets_path, 4)
+                elif tree and type_str == "MonoBehaviour":
+                    # Standart bir monobehaviour ise, kullanıcıya alan seçtirerek çevirelim (MonoBehaviourTranslateDialog)
+                    try:
+                        from asset_viewer import MonoBehaviourTranslateDialog
+                        dialog = MonoBehaviourTranslateDialog(self, selected_obj, tree, env, assets_path)
+                        dialog.exec()
+                    except Exception as e:
+                        if hasattr(self, 'trans_log_list'): self.trans_log_list.addItem(f"❌ MonoBehaviour Çevirici açılamadı: {e}")
+                    return
+                else:
+                    if hasattr(self, 'trans_log_list'): self.trans_log_list.addItem("❌ Seçili nesne geçerli bir I2Languages veya TextAsset değil.")
+                    return
+                    
+            # Connect signals
+            worker.log_signal.connect(lambda msg: (self.trans_log_list.addItem(f"ℹ️ {msg}"), self.trans_log_list.scrollToBottom()) if hasattr(self, 'trans_log_list') else None)
+            worker.progress.connect(lambda cur, tot, msg: self.trans_status_lbl.setText(msg) if hasattr(self, 'trans_status_lbl') else None)
+            
+            def on_finished(success, msg):
+                if hasattr(self, 'install_btn'): self.install_btn.setEnabled(True)
+                if hasattr(self, 'trans_log_list'): 
+                    self.trans_log_list.addItem(f"✅ Çeviri sonucu: {msg}")
+                    self.trans_log_list.scrollToBottom()
+                if success:
+                    def show_mandatory_feedback():
+                        game_name = getattr(self, "current_game", "Bilinmeyen Oyun")
+                        if not game_name: game_name = "Bilinmeyen Oyun"
+                        self.show_community_feedback_dialog(game_name, "Unity")
+                    QTimer.singleShot(1000, show_mandatory_feedback)
+                else:
+                    QMessageBox.critical(self, "Hata", f"Çeviri sırasında hata oluştu:\n{msg}")
+                    
+            worker.finished.connect(on_finished)
+            self.unity_trans_worker = worker
+            
+            if hasattr(self, 'trans_log_list'):
+                self.trans_log_list.addItem(f"🚀 Çeviri başlatılıyor: {os.path.basename(assets_path)}")
+                self.trans_log_list.scrollToBottom()
+            if hasattr(self, 'install_btn'):
+                self.install_btn.setEnabled(False)
+                
+            self.unity_trans_worker.start()
+            
+        except Exception as e:
+            if hasattr(self, 'trans_log_list'): self.trans_log_list.addItem(f"❌ Hata: {str(e)}")
+
+    def manual_add_game(self):
+        """Manuel oyun ekleme (Klasör veya PAK)"""
+        from scanner import GameEngineScanner # Import here to ensure availability
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Manuel Oyun Ekle")
+        msg_box.setStyleSheet("""
+            QMessageBox { 
+                background-color: #1a1f2e; 
+                min-width: 650px;
+            }
+            QLabel { 
+                color: #e8edf2; 
+                font-size: 14px;
+                min-width: 630px;
+                padding: 10px;
+            }
+            QPushButton { 
+                background-color: #2d3748; 
+                color: #e8edf2; 
+                border: 1px solid #3a455e; 
+                padding: 12px 24px; 
+                border-radius: 8px; 
+                font-weight: 700;
+                min-width: 150px;
+                margin: 5px;
+            }
+            QPushButton:hover { 
+                background-color: #6c8eff; 
+                border-color: #7f9cff;
+            }
+        """)
+        msg_box.setText("Nasıl ekleme yapmak istersiniz?")
+        msg_box.setInformativeText("Bir oyun klasörü seçerek otomatik taratabilir veya doğrudan oyun dosyasını seçebilirsiniz.")
+        
+        btn_folder = msg_box.addButton("Klasörü Seç (Tara)", QMessageBox.ActionRole)
+        btn_pak = msg_box.addButton("Dosyası Seç (.pak)", QMessageBox.ActionRole)
+        btn_assets = msg_box.addButton("Dosyası Seç (.assets)", QMessageBox.ActionRole)
+        btn_locres = msg_box.addButton("Locres Seç (.locres)", QMessageBox.ActionRole)
+        btn_cancel = msg_box.addButton("İptal", QMessageBox.RejectRole)
+        
+        msg_box.exec_()
+        clicked_button = msg_box.clickedButton()
+        
+        if clicked_button == btn_cancel: return
+
+        game_data_to_add = None
+
+        if clicked_button == btn_folder:
+            folder_path = QFileDialog.getExistingDirectory(self, "Oyun Klasörünü Seç")
+            if not folder_path: return
+            p_folder = Path(folder_path)
+            scanner = GameEngineScanner()
+            game_info = scanner._analyze_game_folder(p_folder, platform="Manuel")
+            
+            if game_info:
+                game_data_to_add = game_info
+            else:
+                # Manuel Zorlama
+                res = QMessageBox.question(self, "Algılanamadı", "Oyun yapısı algılanamadı. Yine de eklensin mi?", QMessageBox.Yes | QMessageBox.No)
+                if res == QMessageBox.Yes:
+                    game_data_to_add = {
+                        "name": p_folder.name,
+                        "path": str(p_folder),
+                        "exe": "", 
+                        "engine": "Bilinmiyor",
+                        "platform": "Manuel",
+                        "icon": "📁",
+                        "appid": ""
+                    }
+
+        elif clicked_button == btn_pak:
+            file_path, _ = QFileDialog.getOpenFileName(self, "Unreal Oyun Dosyası Seç (.pak)", "", "Pack Files (*.pak)")
+            if file_path:
+                p_file = Path(file_path)
+                game_name = p_file.stem
+                try:
+                    if "Content" in p_file.parent.parent.name: game_name = p_file.parent.parent.parent.name
+                    else: game_name = p_file.parent.parent.name
+                except: pass
+                
+                game_data_to_add = {
+                    "name": game_name,
+                    "path": str(p_file),
+                    "exe": str(p_file),
+                    "engine": "Unreal",
+                    "platform": "Manuel",
+                    "icon": "📦",
+                    "appid": ""
+                }
+
+        elif clicked_button == btn_assets:
+            file_path, _ = QFileDialog.getOpenFileName(self, "Unity Asset Dosyası Seç", "", "Assets (*.assets *.sharedassets);;All Files (*.*)")
+            if file_path:
+                p_file = Path(file_path)
+                game_name = p_file.parent.parent.name
+                game_data_to_add = {
+                    "name": game_name,
+                    "path": str(p_file),
+                    "exe": str(p_file),
+                    "engine": "Unity",
+                    "platform": "Manuel",
+                    "icon": "📄",
+                    "appid": ""
+                }
+
+        elif clicked_button == btn_locres:
+            file_path, _ = QFileDialog.getOpenFileName(self, "Locres Dosyası Seç (.locres)", "", "Locres Files (*.locres)")
+            if file_path:
+                p_file = Path(file_path)
+                game_name = p_file.stem
+                
+                game_data_to_add = {
+                    "name": game_name + " (Locres)",
+                    "path": str(p_file),
+                    "exe": str(p_file),
+                    "engine": "Locres",
+                    "platform": "Manuel",
+                    "icon": "📝",
+                    "appid": ""
+                }
+        
+        # Ekleme ve Kaydetme
+        if game_data_to_add:
+            try:
+                # 1. UI'ya ekle
+                self._add_game_to_table(game_data_to_add)
+                
+                # 2. Cache'e ekle ve kaydet (KALICI YAP)
+                from scanner import GameEngineScanner
+                scanner = GameEngineScanner()
+                current_cache = scanner.load_cache() or []
+                current_cache.append(game_data_to_add)
+                scanner.save_cache(current_cache)
+            except Exception as e:
+                print(f"Manual add save error: {e}")
+
     def on_scan_completed(self, games, save_cache=True):
         self.hourglass_timer.stop()
         self.hourglass_lbl.setVisible(False)
@@ -8955,7 +11213,7 @@ exit
         platform_item.setData(Qt.UserRole, g['exe'])
         self.game_table.setItem(row, 4, platform_item)
 
-    def manual_add_game(self):
+    def _deleted_manual_add_game(self):
         """Manuel oyun ekleme (Klasör veya PAK)"""
         from scanner import GameEngineScanner # Import here to ensure availability
         msg_box = QMessageBox()
@@ -9083,6 +11341,7 @@ exit
         self.game_table.selectRow(row)
 
     def install_selected_game(self):
+        print("[BUTON] install_selected_game CAGIRILDI")
         # Seçili oyuna kurulum yap
         # [FIX] PAK tablosuna tıklayınca game_table seçimi kayboluyor
         if hasattr(self, 'current_game_data') and self.current_game_data:
@@ -9118,84 +11377,122 @@ exit
             translation_method = "full" # Unreal vb. için varsayılan
 
 
+        if engine == "Unity" and getattr(self, '_unity_full_trans_mode', False):
+            selected = self.pak_table.selectedItems()
+            if not selected:
+                QMessageBox.warning(self, "Uyarı", "Lütfen PAK DOSYALARI listesinden çevrilecek dosyayı seçin.")
+                return
+            
+            # PAK table row 0's data is the target
+            row = selected[0].row()
+            target_file_path = self.pak_table.item(row, 0).data(Qt.UserRole)
+            self.start_unity_translation(target_file_path)
+            return
+
         if engine == "Unity" and translation_method == "instant":
             # YENİ: Gelişmiş Tarama ve Seçim Dialogu (Sadece Unity ve Anlık Çeviri için)
             try:
                 dlg = ScanResultDialog(file_path, self)
                 if dlg.exec_() == QDialog.Accepted:
-                    bep_zip, trans_zip, loader_type = dlg.get_selection()
+                    bep_zip, trans_zip, loader_type, injector_zip = dlg.get_selection()
                     
                     # Seçilenleri path olarak gönder (veya None)
                     target_bepinex = bep_zip if bep_zip else None
                     target_trans = trans_zip if trans_zip else None
+                    target_injector = injector_zip if injector_zip else None
                     
                     # Kurulumu Başlat
                     self.run_installation_process(file_path, engine, None, translation_method, game_name=game_name, 
-                                                target_bepinex_zip=target_bepinex, target_translator_zip=target_trans, loader_type=loader_type)
+                                                target_bepinex_zip=target_bepinex, target_translator_zip=target_trans, loader_type=loader_type, target_injector_zip=target_injector)
             except Exception as e:
                 QMessageBox.critical(self, "Hata", f"Tarama başlatılamadı: {e}")
                 print(f"Scan Dialog Error: {e}")
         else:
             # Diğer durumlar (Unreal, Tam Çeviri vb.)
             
-            # [ROBUST FIX] Check if Embedded PAK Interface is Active
-            # We check if pak_table has items, regardless of visibility (in case of UI quirks)
-            use_embedded = False
-            if hasattr(self, 'pak_table') and self.pak_table.rowCount() > 0:
-                 use_embedded = True
-            
-            if use_embedded:
-                try:
-                    logger.debug("EMBEDDED PAK Selection Logic kullanılıyor")
-                    # Get PAK Path
-                    pak_path = None
-                    is_encrypted = False
-                    
-                    # [LEGACY RESTORE] Eğer seçim varsa seçiliyi, yoksa ilk satırı al (Varsayılan)
-                    curr_row = 0
-                    if self.pak_table.selectedItems():
-                        curr_row = self.pak_table.selectedItems()[0].row()
-                    
-                    active_data = getattr(self, 'current_paks_data', None)
-                    if active_data and curr_row < len(active_data):
-                        pak_info = active_data[curr_row]
-                        pak_path = Path(pak_info['path'])
-                        is_encrypted = pak_info['encrypted']
+            # --- UNREAL ENGINE DİNAMİK PAK SEÇİM MANTIĞI ---
+            try:
+                # 1. Puanlanmış PAK listesini topla (GUI'deki sıralama ile)
+                active_data = getattr(self, 'current_paks_data', [])
+                all_pak_paths = [item['path'] for item in active_data]
+                
+                # 2. Seçili içerik dosyasını al (_selected_content_file öncelikli)
+                internal_file = None
+                target_paks = None
+
+                # Sadece tablonun kendisinde fiziksel satırlar varsa cache'i kullan (odak kaybından etkilenmesin diye rowCount ile)
+                if hasattr(self, 'pak_content_table') and self.pak_content_table.rowCount() > 0:
+                    cached = getattr(self, '_selected_content_file', None)
+                    if cached:
+                        internal_file = cached.replace("\\", "/")
                     else:
-                         logger.warning("pak_info bulunamadı (Row: %s, Count: %s)", curr_row, len(active_data) if active_data else "None")
-
-
-                    
-                    # Get Internal File
+                        rows = self.pak_content_table.selectionModel().selectedRows()
+                        row = rows[0].row() if rows else 0 # Seçim yoksa ilk satırı varsay
+                        item = self.pak_content_table.item(row, 0)
+                        if item:
+                            item_data = item.data(Qt.UserRole)
+                            if item_data:
+                                internal_file = item_data.replace("\\", "/")
+                else:
+                    self._selected_content_file = None
                     internal_file = None
-                    if self.pak_content_table.selectedItems():
-                        internal_file = self.pak_content_table.selectedItems()[0].data(Qt.UserRole).replace("\\", "/")
-                    
+
+                # Hangi PAK'tan geldiğini belirle
+                if internal_file:
+                    pak_path = getattr(self, '_last_content_scan_pak_path', None)
                     if pak_path:
-                        logger.debug("Embedded Selection Used -> PAK: %s", pak_path)
-                        logger.debug("Internal File: %s", internal_file)
-                        logger.debug("Encryption Status from Data: %s (Type: %s)", is_encrypted, type(is_encrypted))
-                        
-                        # [OPTIMIZATION] Kullanıcı zaten bir key girdiyse onu kullan
-                        used_key = getattr(self, 'aes_key', None)
-                        if is_encrypted and not used_key:
-                            logger.warning("Encrypted but no key in self.aes_key")
-                        
-                        self.start_targeted_unreal_translation(str(game_dir), engine, pak_path, internal_file, aes_key=used_key, is_encrypted_override=is_encrypted)
-                        return
-                        
-                except Exception as e:
-                    print(f"Embedded Logic Error: {e}")
-            
-            # Fallback
-            self.run_installation_process(file_path, engine, None, translation_method, game_name=game_name)
+                        target_paks = [pak_path]
+                    elif all_pak_paths:
+                        # Seçili satırdaki PAK
+                        curr_row = 0
+                        if self.pak_table.selectedItems():
+                            curr_row = self.pak_table.selectedItems()[0].row()
+                        if curr_row < len(all_pak_paths):
+                            target_paks = [all_pak_paths[curr_row]]
+                else:
+                    # EĞER SAĞ TARAF BOŞ İSE:
+                    # Sol taraftaki pak_table'da seçili olan PAK dosyasını hedefleriz!
+                    curr_row = 0
+                    if hasattr(self, 'pak_table') and self.pak_table.selectedItems():
+                        curr_row = self.pak_table.selectedItems()[0].row()
+                    if all_pak_paths and curr_row < len(all_pak_paths):
+                        target_paks = [all_pak_paths[curr_row]]
+                    else:
+                        target_paks = all_pak_paths # Fallback
+                    
+                    internal_file = None
+                
+                # 3. AES Key hazırlığı — önce tarama sırasında bulunan key'i kullan
+                used_key = getattr(self, '_embedded_aes_key', None) or getattr(self, 'aes_key', None)
+                
+                # 4. Kurulumu Başlat (Liste olarak gönderiyoruz)
+                self.run_installation_process(
+                    file_path, 
+                    engine, 
+                    aes_key=used_key, 
+                    translation_method=translation_method, 
+                    game_name=game_name,
+                    target_pak_path=target_paks, # LISTE GÖNDERİLİYOR
+                    target_internal_file_path=internal_file
+                )
+                return
+
+            except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
+                print(f"[EXCEPT] Unreal Start Error: {e}\n{tb}")
+                if hasattr(self, 'trans_log_list'):
+                    self.trans_log_list.addItem(f"[EXCEPT] {e}")
+                    self.trans_log_list.scrollToBottom()
+                # Fallback
+                self.run_installation_process(file_path, engine, None, translation_method, game_name=game_name)
 
 
-    def run_installation_process(self, file_path, engine="Unity", aes_key=None, translation_method="full", game_name=None, target_bepinex_zip=None, target_translator_zip=None, loader_type="bepinex"):
+    def run_installation_process(self, file_path, engine="Unity", aes_key=None, translation_method="full", game_name=None, target_bepinex_zip=None, target_translator_zip=None, loader_type="bepinex", target_injector_zip=None, target_pak_path=None, target_internal_file_path=None):
         # Genelleştirilmiş kurulum süreci (Thread ile)
         
         # [MOTÖR DESTEK KONTROLÜ]
-        if engine not in ["Unity", "Unreal", "Cobra Engine"]:
+        if engine not in ["Unity", "Unreal", "Cobra Engine", "Locres", "Ren'Py"]:
             QMessageBox.information(self, "Bilgi", 
                 f"{engine} motoru için özellik yakında gelecek.\n\n"
                 "Gelişmeleri takip etmek için mehmetarıtv YouTube kanalına abone olun!")
@@ -9272,7 +11569,7 @@ exit
             
             # Ayarları al
             service_idx = self.trans_service_combo.currentIndex()
-            service_map = {0: "google", 1: "deepl", 2: "gemini"}
+            service_map = {0: "google", 1: "deepl", 2: "gemini", 3: "local_ai"}
             selected_service = service_map.get(service_idx, "google")
             api_key = ""
             
@@ -9295,6 +11592,13 @@ exit
                     speed_val = self.speed_slider.value()
             except: pass
             
+            # [YENİ] Oyun Dili (Kaynak Dil) Seçimi
+            source_lang = "en"
+            if hasattr(self, 'combo_source_lang'):
+                code = self.combo_source_lang.currentData()
+                if code:
+                    source_lang = code
+
             # [YENİ] Hedef Dil Seçimi
             target_lang = "tr"
             if hasattr(self, 'combo_target_lang'):
@@ -9305,7 +11609,25 @@ exit
             if aes_key:
                 self.trans_log_list.addItem(f"🔑 Manuel AES Key Kullanılıyor")
              
-            self.install_worker = InstallationWorker(file_path, engine, selected_service, api_key, max_workers=speed_val, aes_key=aes_key, translation_method=translation_method, game_name=game_name, target_bepinex_zip=target_bepinex_zip, target_translator_zip=target_translator_zip, loader_type=selected_loader, target_lang=target_lang)
+            self.install_worker = InstallationWorker(
+                file_path, 
+                engine, 
+                selected_service, 
+                api_key, 
+                max_workers=speed_val, 
+                aes_key=aes_key, 
+                translation_method=translation_method, 
+                game_name=game_name, 
+                target_bepinex_zip=target_bepinex_zip, 
+                target_translator_zip=target_translator_zip, 
+                loader_type=selected_loader, 
+                target_lang=target_lang, 
+                target_injector_zip=target_injector_zip,
+                target_pak_path=target_pak_path,
+                target_internal_file_path=target_internal_file_path,
+                source_lang=source_lang
+            )
+            self.install_worker.main_window = self
             if hasattr(self, 'install_worker'):
                 self.install_worker.log_updated.connect(self.on_install_log)
                 self.install_worker.progress_updated.connect(self.trans_progress.setValue)
@@ -9336,15 +11658,13 @@ exit
     def handle_aes_key_request(self, game_name, result_queue, event):
         """Worker thread AES Key istediğinde çalışır (GUI Thread)"""
         try:
-            key, ok = QInputDialog.getText(self, "Şifreleme Anahtarı Gerekli", 
-                         f"'{game_name}' oyununun dosyaları şifreli.\n"
-                         "Lütfen AES Key giriniz (0x...):", 
-                         QLineEdit.Normal, "0x")
+            # Eski QInputDialog penceresi kaldırıldı!
+            # Kullanıcı AES key işlemini zaten AESKeyDialog ile çözmeli.
+            if hasattr(self, 'trans_log_list'):
+                self.trans_log_list.addItem("❌ HATA: İşlem sırasında beklenmedik şekilde AES Key istendi. Lütfen PAK'ı yeniden tarayın.")
+                self.trans_log_list.scrollToBottom()
             
-            if ok and key:
-                result_queue.put(key.strip())
-            else:
-                result_queue.put(None) # İptal
+            result_queue.put(None) # İptal
                 
         except Exception as e:
             print(f"AES Dialog Error: {e}")
@@ -9373,7 +11693,7 @@ exit
         try:
             dialog = QDialog(self)
             dialog.setWindowTitle("Çeviri Tamamlandı - Kontrol Zamanı")
-            dialog.setFixedSize(500, 300)
+            dialog.setFixedSize(500, 450)
             dialog.setStyleSheet("QDialog { background-color: #1a1f2e; color: white; }")
             
             layout = QVBoxLayout()
@@ -9388,7 +11708,8 @@ exit
             
             desc = QLabel("Çeviri tamamlandı ama paketlenmedi.\nCSV dosyasını açıp gerekli düzeltmeleri yapabilirsiniz.\n\n⚠️ ÖNEMLİ: Düzenlemeyi bitirince Excel/Notepad'i KAPATIN ve 'Devam Et' butonuna basın.")
             desc.setAlignment(Qt.AlignCenter)
-            desc.setStyleSheet("color: #94a3b8; font-size: 14px; margin-bottom: 10px;")
+            desc.setWordWrap(True)
+            desc.setStyleSheet("color: #94a3b8; font-size: 14px; margin-bottom: 15px;")
             layout.addWidget(desc)
             
             # Butonlar
@@ -9645,37 +11966,12 @@ exit
             
             else:
                 if msg == "AES_REQUIRED_BY_USER":
-                    # AES KEY İSTE
-                    key, ok = QInputDialog.getText(self, "Şifreleme Anahtarı Gerekli", 
-                                                 "Bu oyunun dosyaları şifreli ve otomatik olarak çözülemedi.\n"
-                                                 "Lütfen 0x ile başlayan AES Key'i giriniz:", 
-                                                 QLineEdit.Normal, "0x")
-                    
-                    if ok and key and len(key) > 10:
-                        self.trans_log_list.addItem(f"🔄 AES Key alındı, işlem tekrar deneniyor...")
-                        # Restart with key
-                        # Eski worker parametrelerini saklamalıyız ama basitçe son seçimi alabiliriz
-                        # run_installation_process tekrar çağrılabilir
-                        
-                        # Parametreleri yeniden topla
-                        selected = self.game_table.selectedItems()
-                        if selected:
-                            row = selected[0].row()
-                            path_item = self.game_table.item(row, 4)
-                            file_path = path_item.data(Qt.UserRole)
-                            engine = self.game_table.item(row, 3).text()
-                            game_name = self.game_table.item(row, 1).text()
-                            
-                            # Method
-                            method = "full"
-                            if hasattr(self, 'rb_instant') and self.rb_instant.isChecked():
-                                method = "instant"
-                                
-                            self.run_installation_process(file_path, engine, aes_key=key.strip(), translation_method=method, game_name=game_name)
-                            return # Fonksiyondan çık, yeni worker başladı
-
-                    else:
-                         self.trans_log_list.addItem("❌ AES Key girişi iptal edildi.")
+                    # KULLANICI İSTEDİ: Eski çirkin pencereyi kaldırıyoruz.
+                    # Kullanıcı zaten soldaki listeden PAK tarayıp (ve modern diyalogda key girip) csv'leri açmış olmalı.
+                    if hasattr(self, 'trans_log_list'):
+                        self.trans_log_list.addItem("❌ HATA: Şifreleme anahtarı doğrulanamadı. Lütfen önce PAK'ı tarayıp şifreyi çözün.")
+                        self.trans_log_list.scrollToBottom()
+                    QMessageBox.warning(self, "Şifreli Dosya", "Bu oyun şifreli. Lütfen önce soldaki PAK listesinden dosyayı seçip 'Seçili Pak Tara' butonunu kullanarak şifreyi kırın.")
                 
                 # QMessageBox yok edildi
                 self.trans_log_list.addItem(f"❌ HATA DETAYI: {str(msg)}")
@@ -9805,14 +12101,80 @@ exit
     def save_deepl_key(self):
         # DeepL API anahtarını anlık kaydet
         key = self.deepl_key_input.text().strip()
+        
+        # Regex Validation (DeepL key format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx:fx or just hex)
+        # DeepL anahtarları genelde UUID ve sonunda :fx (Free) veya :dp (Pro) olur
+        # Çok katı olmamakla birlikte boşluk ve çok kısa olmasını engelleyelim
+        if key and len(key) < 10:
+             self.deepl_key_input.setStyleSheet("QLineEdit { background-color: #1a1f2e; color: #ef4444; border: 1px solid #ef4444; border-radius: 6px; padding: 5px 8px; }")
+             return
+        else:
+             self.deepl_key_input.setStyleSheet("QLineEdit { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; padding: 5px 8px; }")
+
         self.settings["deepl_api_key"] = key
         self.save_settings()
+
+    def test_deepl_connection(self):
+        """DeepL API anahtarını test et"""
+        key = self.deepl_key_input.text().strip()
+        if not key:
+            QMessageBox.warning(self, "Hata", "Lütfen önce bir API anahtarı girin.")
+            return
+
+        self.test_deepl_btn.setEnabled(False)
+        self.test_deepl_btn.setText("...")
+        
+        self.deepl_test_worker = APITestWorker("deepl", key)
+        self.deepl_test_worker.finished.connect(self.on_deepl_test_finished)
+        self.deepl_test_worker.start()
+
+    def on_deepl_test_finished(self, success, message):
+        self.test_deepl_btn.setEnabled(True)
+        self.test_deepl_btn.setText("Test")
+        if success:
+            QMessageBox.information(self, "Başarılı", message)
+        else:
+            QMessageBox.critical(self, "Hata", message)
 
     def save_gemini_key(self):
         # Gemini API anahtarını anlık kaydet
         key = self.gemini_key_input.text().strip()
+        
+        # Regex Validation (Gemini format: AIza...)
+        if key and not key.startswith("AIza"):
+             self.gemini_key_input.setStyleSheet("QLineEdit { background-color: #1a1f2e; color: #ef4444; border: 1px solid #ef4444; border-radius: 6px; padding: 5px 8px; }")
+             return
+        else:
+             self.gemini_key_input.setStyleSheet("QLineEdit { background-color: #1a1f2e; color: #e8edf2; border: 1px solid #2d3748; border-radius: 6px; padding: 5px 8px; }")
+
         self.settings["gemini_api_key"] = key
         self.save_settings()
+
+    def test_gemini_connection(self):
+        """Gemini API anahtarını test et"""
+        key = self.gemini_key_input.text().strip()
+        if not key:
+            QMessageBox.warning(self, "Hata", "Lütfen önce bir API anahtarı girin.")
+            return
+            
+        if not key.startswith("AIza"):
+            QMessageBox.warning(self, "Hata", "Geçersiz Gemini anahtarı! Anahtar 'AIza' ile başlamalıdır.")
+            return
+
+        self.test_gemini_btn.setEnabled(False)
+        self.test_gemini_btn.setText("...")
+        
+        self.gemini_test_worker = APITestWorker("gemini", key)
+        self.gemini_test_worker.finished.connect(self.on_gemini_test_finished)
+        self.gemini_test_worker.start()
+
+    def on_gemini_test_finished(self, success, message):
+        self.test_gemini_btn.setEnabled(True)
+        self.test_gemini_btn.setText("Test")
+        if success:
+            QMessageBox.information(self, "Başarılı", message)
+        else:
+            QMessageBox.critical(self, "Hata", message)
 
     def check_deepl_usage(self):
         # DeepL kullanım limitini kontrol et
@@ -9898,6 +12260,8 @@ exit
 
         game_data = self.current_game_data
         game_name = game_data.get('name', 'Bilinmeyen Oyun')
+        engine = game_data.get('engine', '')
+        is_unreal = ("unreal" in engine.lower())
         
         # Custom Dialog for Cleanup Options
         dlg = QDialog(self)
@@ -9911,7 +12275,10 @@ exit
         lbl.setStyleSheet("font-weight: bold; margin-bottom: 10px;")
         layout.addWidget(lbl)
         
-        cb_files = QCheckBox("Dosyaları Temizle (BepInEx, Translator)")
+        if is_unreal:
+            cb_files = QCheckBox("Yamayı Kaldır (Yedeği Geri Yükle)")
+        else:
+            cb_files = QCheckBox("Dosyaları Temizle (BepInEx, Translator)")
         cb_files.setChecked(True)
         cb_files.setStyleSheet("font-size: 14px; margin-bottom: 5px;")
         layout.addWidget(cb_files)
@@ -9949,8 +12316,48 @@ exit
                 
                 # 1. Dosya Temizliği
                 if cb_files.isChecked():
-                    success, msg = TranslatorManager.uninstall(target)
-                    msgs.append(f"Dosyalar: {msg}")
+                    if is_unreal:
+                        # Unreal Engine yama kaldırma mantığı
+                        import shutil
+                        root_path = Path(target).parent if os.path.isfile(target) else Path(target)
+                        
+                        # Content/Paks klasörünü bulalım
+                        paks_dir = None
+                        for p in root_path.rglob("Content/Paks"):
+                            if p.exists() and p.is_dir():
+                                paks_dir = p
+                                break
+                        if not paks_dir:
+                            paks_dir = root_path
+                            
+                        restored_count = 0
+                        deleted_patch_count = 0
+                        
+                        # .pak.bak yedeklerini bul ve geri yükle
+                        for bak_file in paks_dir.rglob("*.pak.bak"):
+                            orig_pak = bak_file.with_suffix("") # .pak.bak -> .pak
+                            try:
+                                if orig_pak.exists():
+                                    orig_pak.unlink()
+                                shutil.move(str(bak_file), str(orig_pak))
+                                restored_count += 1
+                            except Exception as e_unreal_clean:
+                                print(f"Yedek geri yükleme hatası ({bak_file.name}): {e_unreal_clean}")
+                                
+                        # Varsa *_TR.pak dosyalarını sil
+                        for patch_file in paks_dir.rglob("*_TR.pak"):
+                            try:
+                                patch_file.unlink()
+                                deleted_patch_count += 1
+                            except: pass
+                            
+                        if restored_count > 0 or deleted_patch_count > 0:
+                            msgs.append(f"Yama: {restored_count} orijinal dosya geri yüklendi, {deleted_patch_count} yama temizlendi.")
+                        else:
+                            msgs.append("Yama: Geri yüklenecek yedek dosya (.pak.bak) bulunamadı.")
+                    else:
+                        success, msg = TranslatorManager.uninstall(target)
+                        msgs.append(f"Dosyalar: {msg}")
                 
                 # 2. Registry Temizliği
                 if cb_reg.isChecked():
@@ -9970,9 +12377,121 @@ exit
 
 
 
+    def _handle_agent_command(self, args, response_dict, event):
+        """Sesli asistanın gönderdiği kontrol komutlarını ana iş parçacığında yürütür"""
+        try:
+            action = args.get("action")
+            if not action:
+                response_dict["status"] = "error"
+                response_dict["message"] = "Eylem (action) belirtilmedi."
+                return
+
+            if action == "switch_page":
+                page_index = args.get("page_index")
+                if page_index is not None:
+                    self.switch_page(int(page_index))
+                    response_dict["status"] = "ok"
+                    response_dict["message"] = f"Sayfa {page_index} başarıyla açıldı."
+                else:
+                    response_dict["status"] = "error"
+                    response_dict["message"] = "page_index belirtilmedi."
+
+            elif action == "get_state":
+                state = {
+                    "current_page": self.stack.currentIndex(),
+                    "selected_game": self.current_game_data if hasattr(self, 'current_game_data') else None,
+                    "library_games": [g.get('name') for g in getattr(self, '_cached_games', [])] if hasattr(self, '_cached_games') else [],
+                    "free_games": [g.get('title') for g in getattr(self, '_cached_free_games', [])] if hasattr(self, '_cached_free_games') else []
+                }
+                response_dict["status"] = "ok"
+                response_dict["state"] = state
+
+            elif action == "select_game":
+                game_name = args.get("game_name")
+                found = False
+                if game_name and hasattr(self, '_cached_games'):
+                    for g in self._cached_games:
+                        if game_name.lower() in g.get('name', '').lower():
+                            self.show_platform(g)
+                            self.go_to_translation()
+                            response_dict["status"] = "ok"
+                            response_dict["message"] = f"'{g.get('name')}' oyunu seçildi ve çeviri sayfasına yönlendirildi."
+                            found = True
+                            break
+                if not found:
+                    response_dict["status"] = "error"
+                    response_dict["message"] = f"'{game_name}' isimli oyun kütüphanede bulunamadı."
+
+            elif action == "call_method":
+                method_name = args.get("method_name")
+                if method_name == "install_selected_game":
+                    try:
+                        self.install_selected_game()
+                        response_dict["status"] = "ok"
+                        response_dict["message"] = "Çeviri kurulum işlemi başlatıldı."
+                    except Exception as e:
+                        response_dict["status"] = "error"
+                        response_dict["message"] = f"Çeviri başlatılırken hata oluştu: {e}"
+                elif method_name in ["scan_games", "auto_scan_games"]:
+                    try:
+                        self.auto_scan_games()
+                        response_dict["status"] = "ok"
+                        response_dict["message"] = "Kütüphane taraması başlatıldı."
+                    except Exception as e:
+                        response_dict["status"] = "error"
+                        response_dict["message"] = f"Kütüphane taraması başlatılırken hata oluştu: {e}"
+                elif method_name == "fetch_free_games":
+                    try:
+                        self.fetch_free_games()
+                        response_dict["status"] = "ok"
+                        response_dict["message"] = "Ücretsiz oyunlar listesi yenileniyor."
+                    except Exception as e:
+                        response_dict["status"] = "error"
+                        response_dict["message"] = f"Yenileme başlatılırken hata oluştu: {e}"
+                else:
+                    if hasattr(self, method_name) and callable(getattr(self, method_name)):
+                        try:
+                            method = getattr(self, method_name)
+                            method_args = args.get("method_args", [])
+                            method(*method_args)
+                            response_dict["status"] = "ok"
+                            response_dict["message"] = f"'{method_name}' metodu çalıştırıldı."
+                        except Exception as e:
+                            response_dict["status"] = "error"
+                            response_dict["message"] = f"Metot çalıştırılırken hata: {e}"
+                    else:
+                        response_dict["status"] = "error"
+                        response_dict["message"] = f"'{method_name}' isminde çalıştırılabilir bir metot bulunamadı."
+            else:
+                response_dict["status"] = "error"
+                response_dict["message"] = f"Bilinmeyen eylem: {action}"
+        except Exception as e:
+            response_dict["status"] = "error"
+            response_dict["message"] = f"Komut işlenirken dahili hata oluştu: {str(e)}"
+        finally:
+            event.set()
+
     def closeEvent(self, event):
         """Uygulama kapatıldığında tüm süreçleri öldür ve temizlik yap"""
         try:
+            # Ark Reaktörü ve Sunucuyu Kapat
+            if hasattr(self, "_reactor_state_server") and self._reactor_state_server:
+                try: self._reactor_state_server.stop()
+                except: pass
+            if hasattr(self, "_reactor_widget") and self._reactor_widget:
+                try: self._reactor_widget.close()
+                except: pass
+
+            # Sesli asistan process'ini kapat
+            if hasattr(self, "_agent_process") and self._agent_process:
+                try:
+                    self._agent_process.terminate()
+                    self._agent_process.wait(timeout=3)
+                except: pass
+            if hasattr(self, "_agent_log_file") and self._agent_log_file:
+                try: self._agent_log_file.close()
+                except: pass
+
             # 1. Secure Connect (DNS/MemoFast Ağ Servisi) Kapat
             try:
                 self.reset_windows_dns()
@@ -10441,29 +12960,48 @@ class ScanResultDialog(QDialog):
         
         # Kütüphane (Loader) Satırı
         bep_row = QHBoxLayout()
-        self.lbl_library_title = QLabel("Kütüphane (BepInEx):")
-        self.lbl_library_title.setFixedWidth(140)
-        self.combo_bepinex = QComboBox() # İsim değişmedi ama içeriği değişecek
+        # Kütüphane (Loader) Satırı
+        bep_row = QHBoxLayout()
+        self.chk_bepinex = QCheckBox("Kütüphane (BepInEx):")
+        self.chk_bepinex.setChecked(True)
+        self.chk_bepinex.setFixedWidth(140)
+        self.combo_bepinex = QComboBox() 
+        self.chk_bepinex.toggled.connect(self.combo_bepinex.setEnabled)
         self.bep_warn_icon = QLabel("⚠️")
         self.bep_warn_icon.setToolTip("MİMARİ UYUMSUZLUĞU! Oyun x64 iken x86 kütüphane seçildi.")
         self.bep_warn_icon.setStyleSheet("color: #ef4444; font-size: 20px; font-weight: bold;")
         self.bep_warn_icon.hide()
         
-        bep_row.addWidget(self.lbl_library_title)
+        bep_row.addWidget(self.chk_bepinex)
         bep_row.addWidget(self.combo_bepinex, 1)
         bep_row.addWidget(self.bep_warn_icon)
         sg_layout.addLayout(bep_row)
         
         # Translator Satırı
         trans_row = QHBoxLayout()
-        trans_lbl = QLabel("Eklenti (Translator):")
-        trans_lbl.setFixedWidth(140)
+        self.chk_translator = QCheckBox("Eklenti (Translator):")
+        self.chk_translator.setChecked(True)
+        self.chk_translator.setFixedWidth(140)
         self.combo_translator = QComboBox()
-        trans_row.addWidget(trans_lbl)
+        self.chk_translator.toggled.connect(self.combo_translator.setEnabled)
+        trans_row.addWidget(self.chk_translator)
         trans_row.addWidget(self.combo_translator, 1)
         # Spacer for align
         trans_row.addSpacing(25) 
         sg_layout.addLayout(trans_row)
+        
+        # Ek (UnityInjector) Satırı
+        ui_row = QHBoxLayout()
+        self.chk_injector = QCheckBox("Ek (UnityInjector):")
+        self.chk_injector.setChecked(True)
+        self.chk_injector.setToolTip("Ekstra UnityInjector zip'ini de dahil etmek için.")
+        self.chk_injector.setFixedWidth(140)
+        self.combo_injector = QComboBox()
+        self.chk_injector.toggled.connect(self.combo_injector.setEnabled)
+        ui_row.addWidget(self.chk_injector)
+        ui_row.addWidget(self.combo_injector, 1)
+        ui_row.addSpacing(25)
+        sg_layout.addLayout(ui_row)
         
         # Filtre Kontrolü
         filter_layout = QHBoxLayout()
@@ -10537,6 +13075,19 @@ class ScanResultDialog(QDialog):
         self.btn_fix.setStyleSheet("background-color: #f59e0b; color: white; padding: 10px 15px; border-radius: 8px; font-size: 13px; font-weight: bold;")
         self.btn_fix.clicked.connect(self.do_fix)
         
+        # [YENİ] AI Öneri Butonu
+        self.btn_ai_suggest = QPushButton("🤖 AI Öneri")
+        self.btn_ai_suggest.setStyleSheet("background-color: #8b5cf6; color: white; padding: 10px 15px; border-radius: 8px; font-size: 13px; font-weight: bold;")
+        self.btn_ai_suggest.setToolTip("Gemini AI ile oyuna en uygun araçları otomatik seçtirir")
+        self.btn_ai_suggest.clicked.connect(self.do_ai_suggest)
+        # API key yoksa butonu devre dışı bırak
+        has_api_key = False
+        if self.parent() and hasattr(self.parent(), 'settings'):
+            has_api_key = bool(self.parent().settings.get("gemini_api_key", ""))
+        if not has_api_key:
+            self.btn_ai_suggest.setEnabled(False)
+            self.btn_ai_suggest.setToolTip("Gemini API anahtarı gerekli (Ayarlar > API Key)")
+        
         self.btn_cancel = QPushButton("Vazgeç")
         self.btn_cancel.setObjectName("cancel")
         self.btn_cancel.setMinimumHeight(40)
@@ -10549,6 +13100,7 @@ class ScanResultDialog(QDialog):
         
         btn_layout.addWidget(self.btn_uninstall)
         btn_layout.addWidget(self.btn_fix)
+        btn_layout.addWidget(self.btn_ai_suggest)
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_cancel)
         btn_layout.addWidget(self.btn_install)
@@ -10575,6 +13127,11 @@ class ScanResultDialog(QDialog):
         # Akıllı Eşleştirme Sorgusu
         self.match_data = tm.get_compatible_tools(self.game_path)
         self.is_unity_6 = self.match_data.get("is_unity_6", False)
+        
+        
+        # Dinamik BepInEx Bleeding Edge versiyonlarını internetten çek
+        self.remote_bepinex_builds = tm.fetch_latest_bepinex_builds()
+        
         self.analysis_results = {
             "score": self.components.get("compatibility_score", 0),
             "rec_bep": self.match_data.get("recommended_bepinex"),
@@ -10586,7 +13143,7 @@ class ScanResultDialog(QDialog):
 
     def refresh_tool_lists(self):
         # Gerekli combo box'lar ve radio button'lar henüz başlatılmamışsa erken çık
-        required_attrs = ['combo_bepinex', 'combo_translator', 'rb_melon', 'rb_bepinex', 'lbl_library_title']
+        required_attrs = ['combo_bepinex', 'combo_translator', 'rb_melon', 'rb_bepinex', 'chk_bepinex']
         if not all(hasattr(self, attr) for attr in required_attrs):
             return
             
@@ -10603,7 +13160,7 @@ class ScanResultDialog(QDialog):
         
         if is_melon:
             # --- MELONLOADER LISTELEME ---
-            self.lbl_library_title.setText("Kütüphane (Melon):")
+            self.chk_bepinex.setText("Kütüphane (Melon):")
             
             # [FIX] ÖNCE YEREL KÜTÜPHANEYİ LİSTELE (Kullanıcı İsteği)
             melon_cats = [
@@ -10702,8 +13259,51 @@ class ScanResultDialog(QDialog):
                 self.combo_translator.setCurrentIndex(selected_trans_idx)
 
         else:
-            # --- BEPINEX LISTELEME (ESKİ) ---
-            self.lbl_library_title.setText("Kütüphane (BepInEx):")
+            # --- BEPINEX LISTELEME (ESKİ + DİNAMİK) ---
+            self.chk_bepinex.setText("Kütüphane (BepInEx):")
+            
+            # Dinamik olarak internetten çekilen güncel build'i ekle
+            key = f"{self.backend}_{self.arch}"
+            rec_bep_path = str(self.analysis_results.get("rec_bep", ""))
+            
+            has_remote = False
+            
+            # Etiket belileme (Kullanıcı dostu)
+            cat_tag = ""
+            if self.backend == "il2cpp":
+                try:
+                     year = int(self.unity_ver.split(".")[0])
+                     cat_tag = "Modern IL2CPP" if year >= 2022 else "Legacy IL2CPP"
+                except:
+                     cat_tag = "IL2CPP"
+            else:
+                cat_tag = f"Mono {self.arch.upper()}"
+            
+            if hasattr(self, 'remote_bepinex_builds') and key in self.remote_bepinex_builds:
+                rb_list = self.remote_bepinex_builds[key]
+                has_remote = True
+                
+                for idx, rb in enumerate(rb_list):
+                    # Tüm Sürümleri Göster kapalıysa, internetten sadece en son sürümü (0) göster
+                    if not self.show_all_versions and idx > 0:
+                        continue
+                        
+                    remote_url = rb["url"]
+                    build_ver = rb["build"]
+                    
+                    # Şık Görüntü: [Mono X64] BepInEx v6 (be.755)
+                    disp_name = f"[{cat_tag}] BepInEx v6 (be.{build_ver})"
+                    
+                    # İlk (en yeni) sürüm önerilen olur eğer yerel paket uyuşmuyorsa
+                    if idx == 0:
+                        if not rec_bep_path:
+                            disp_name = f"⭐ {disp_name} (İNDİR / ÖNERİLEN)"
+                        else:
+                            disp_name = f"☁️ {disp_name} (İNDİR / YENİ)"
+                    else:
+                        disp_name = f"☁️ {disp_name} (İNDİR)"
+                            
+                    self.combo_bepinex.addItem(disp_name, f"DOWNLOAD_BEPINEX:{remote_url}")
             
             bep_cats = [
                 ("Modern IL2CPP", "bepinex_il2cpp_modern", lambda f: self.backend == "il2cpp" and self.arch in f.name),
@@ -10712,19 +13312,31 @@ class ScanResultDialog(QDialog):
                 ("Mono x86", "bepinex_x86", lambda f: self.backend == "mono" and self.arch == "x86")
             ]
             
-            rec_bep_path = str(self.analysis_results["rec_bep"]) if self.analysis_results["rec_bep"] else ""
-            
-            for tag, key, is_compatible in bep_cats:
-                for f in tools.get(key, []):
+            for tag, bkey, is_compatible in bep_cats:
+                for f in tools.get(bkey, []):
                     path_str = str(f)
                     is_ok = is_compatible(f)
                     
                     if not self.show_all_versions and not is_ok:
                         continue
                     
-                    display_name = f"[{tag}] {f.name}"
+                    import re
+                    clean_name = f.name
+                    # İsimleri Temizle: BepInEx-Unity.IL2CPP-win-x64-6.0.0-be.752+... -> BepInEx v6 (be.752)
+                    match = re.search(r'-be\.(\d+)', clean_name)
+                    if match:
+                        clean_name = f"BepInEx v6 (be.{match.group(1)})"
+                    elif "6.0.0-pre.1" in clean_name:
+                        clean_name = "BepInEx v6 (pre.1 - Eski)"
+                    elif "5.4" in clean_name:
+                        clean_name = "BepInEx v5.4 (Klasik)"
+                        
+                    display_name = f"[{tag}] {clean_name}"
+                    
                     if path_str == rec_bep_path:
-                        display_name = "⭐ " + display_name + " (ÖNERİLEN)"
+                        display_name = "⭐ " + display_name + " (YÜKLÜ / ÖNERİLEN)"
+                    else:
+                        display_name = "📁 " + display_name + " (YÜKLÜ)"
                     
                     self.combo_bepinex.addItem(display_name, path_str)
                     
@@ -10754,6 +13366,16 @@ class ScanResultDialog(QDialog):
                     if path_str == rec_trans_path:
                         self.combo_translator.setCurrentIndex(self.combo_translator.count() - 1)
 
+            # UnityInjector Listesi
+            self.combo_injector.clear()
+            self.combo_injector.addItem("Yok (Tavsiye Edilen)", "")
+            
+            from translator_manager import TranslatorManager
+            injector_path = Path(TranslatorManager.TOOLS_PATH) / "XUnity AutoTranslator UnityInjector.zip"
+            if injector_path.exists():
+                self.combo_injector.addItem("⚙️ XUnity AutoTranslator UnityInjector", str(injector_path))
+                self.combo_injector.setCurrentIndex(1) # Otomatik seçili gelsin mi? Yoksa 0 mı kalsın? İstediği anlaşıldığı için otomatik seçtiriyorum
+
         self.combo_bepinex.blockSignals(False)
         self.combo_translator.blockSignals(False)
         self.update_warnings()
@@ -10782,10 +13404,13 @@ class ScanResultDialog(QDialog):
             self.bep_warn_icon.hide()
 
     def get_selection(self):
-        bep = self.combo_bepinex.currentData()
-        trans = self.combo_translator.currentData()
+        bep = self.combo_bepinex.currentData() if self.chk_bepinex.isChecked() else "SKIP"
+        trans = self.combo_translator.currentData() if self.chk_translator.isChecked() else "SKIP"
+        injector = self.combo_injector.currentData() if self.chk_injector.isChecked() else "SKIP"
+        if injector == "": injector = "SKIP"
+        
         loader_type = "melon" if self.rb_melon.isChecked() else "bepinex"
-        return bep, trans, loader_type
+        return bep, trans, loader_type, injector
 
     def do_fix(self):
         """
@@ -11045,6 +13670,90 @@ class ScanResultDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Hata", f"İçe aktarma sırasında hata:\n{e}")
 
+    def do_ai_suggest(self):
+        """Gemini AI ile oyuna en uygun araçları seçtirir ve combo box'ları günceller."""
+        try:
+            from translator_manager import TranslatorManager
+            
+            # API key ve modeli al
+            api_key = ""
+            model_name = "models/gemini-2.5-flash"
+            if self.parent() and hasattr(self.parent(), 'settings'):
+                api_key = self.parent().settings.get("gemini_api_key", "")
+                model_name = self.parent().settings.get("preferred_gemini_model", "models/gemini-2.5-flash")
+            
+            if not api_key:
+                QMessageBox.warning(self, "Uyarı", "Gemini API anahtarı bulunamadı!\n\nAyarlar sayfasından API anahtarınızı girin.")
+                return
+            
+            # Butonu devre dışı bırak (çift tıklama önleme)
+            self.btn_ai_suggest.setEnabled(False)
+            self.btn_ai_suggest.setText("⏳ Analiz...")
+            QApplication.processEvents()
+            
+            # Gemini'ye gönder
+            ai_result, error_msg = TranslatorManager.ai_select_tools(self.match_data, api_key, model_name)
+            
+            if not ai_result:
+                error_text = error_msg if error_msg else "Bilinmeyen bir hata oluştu."
+                QMessageBox.warning(self, "AI Hatası", f"AI yanıt veremedi:\n\n{error_text}\n\nMevcut öneriler korunuyor.")
+                self.btn_ai_suggest.setEnabled(True)
+                self.btn_ai_suggest.setText("🤖 AI Öneri")
+                return
+            
+            print(f"🤖 AI Sonucu: {ai_result}")
+            
+            # Loader tipini güncelle (Radio button)
+            if ai_result["loader_type"] == "melon":
+                self.rb_melon.setChecked(True)
+            else:
+                self.rb_bepinex.setChecked(True)
+            
+            # Combo box'larda AI'ın önerdiği dosyayı seç
+            loader_selected = False
+            trans_selected = False
+            
+            if ai_result.get("loader_file_valid"):
+                loader_fname = ai_result["loader_file"]
+                for i in range(self.combo_bepinex.count()):
+                    item_data = self.combo_bepinex.itemData(i)
+                    if item_data and loader_fname in str(item_data):
+                        self.combo_bepinex.setCurrentIndex(i)
+                        loader_selected = True
+                        break
+            
+            if ai_result.get("translator_file_valid"):
+                trans_fname = ai_result["translator_file"]
+                for i in range(self.combo_translator.count()):
+                    item_data = self.combo_translator.itemData(i)
+                    if item_data and trans_fname in str(item_data):
+                        self.combo_translator.setCurrentIndex(i)
+                        trans_selected = True
+                        break
+            
+            # Sonuç mesajı
+            reason = ai_result.get('reason', 'AI tarafından seçildi')
+            msg_parts = [f"🤖 AI Analizi Tamamlandı\n\n📋 Açıklama: {reason}"]
+            msg_parts.append(f"\n\n🔧 Loader: {ai_result['loader_type'].upper()}")
+            
+            if ai_result.get('loader_file'):
+                status = "✅" if loader_selected else "⚠️ (listede bulunamadı)"
+                msg_parts.append(f"\n📦 Dosya: {ai_result['loader_file']} {status}")
+            
+            if ai_result.get('translator_file'):
+                status = "✅" if trans_selected else "⚠️ (listede bulunamadı)"
+                msg_parts.append(f"\n🌐 Translator: {ai_result['translator_file']} {status}")
+            
+            QMessageBox.information(self, "AI Öneri", "".join(msg_parts))
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Hata", f"AI analizi sırasında hata:\n{e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self.btn_ai_suggest.setEnabled(True)
+            self.btn_ai_suggest.setText("🤖 AI Öneri")
+
     def do_cleanup(self):
         msg = QMessageBox(self)
         msg.setWindowTitle("🗑️ Evrensel Temizlik")
@@ -11130,6 +13839,9 @@ class ScanResultDialog(QDialog):
                     
             except Exception as e:
                 QMessageBox.critical(self, "❌ Hata", f"Temizleme sırasında hata oluştu:\n\n{e}")
+
+
+
 
 
 # --- PAK SELECTION DIALOG & WORKERS ---
@@ -11219,30 +13931,35 @@ class ContentScanWorker(QThread):
         try:
             tool_path = Config.BASE_PATH / "files" / "tools" / "repak.exe"
             
-            cmd = [str(tool_path), "list", str(self.pak_path)]
+            cmd = [str(tool_path)]
             if self.aes_key:
-                cmd.extend(["--aes-key", self.aes_key])
+                clean_key = self.aes_key.replace("0x", "").replace("0X", "").strip()
+                cmd.extend(["--aes-key", clean_key])
+            cmd.extend(["list", str(self.pak_path)])
                 
             # Çalıştır
             try:
-                # subprocess.CREATE_NO_WINDOW = 0x08000000
                 creation_flags = 0x08000000
                 res = subprocess.run(
                     cmd, 
                     capture_output=True,
                     text=True,
+                    timeout=120,
                     creationflags=creation_flags
                 )
                 
                 if res.returncode == 0:
-                    # Çıktıyı parse et
                     for line in res.stdout.splitlines():
                         line = line.strip()
                         if line and not line.startswith("Reading"):
                             files.append(line)
+                else:
+                    files.append(f"__ERROR__:{(res.stdout + res.stderr).strip()}")
+            except subprocess.TimeoutExpired:
+                files.append("__ERROR__:Zaman aşımı (120sn). PAK çok büyük veya repak yanıt vermiyor.")
             except Exception as e:
                 print(f"Repak List Error: {e}")
-                files.append(f"Hata: {str(e)}")
+                files.append(f"__ERROR__:{str(e)}")
                 
         except Exception as e:
             print(f"Content Scan Error: {e}")
@@ -11563,6 +14280,10 @@ class PakSelectionDialog(QDialog):
     def update_buttons(self):
         self.btn_translate.setEnabled(bool(self.content_table.selectedItems()))
 
+    # NOT: Telemetri fonksiyonları (ask_telemetry_consent, send_community_data)
+    # yukarıda tek bir yerde tanımlıdır. Buradaki mükerrer kopyalar kaldırıldı —
+    # önceki kopya imza uyumsuzluğu nedeniyle çeviri telemetrisini bozuyordu.
+
 
 
 # End of file
@@ -11594,6 +14315,7 @@ if __name__ == "__main__":
     except: pass
 
     app = QApplication(sys.argv)
+    app.setStyleSheet(DARK_THEME_STYLESHEET)
     app.setFont(QFont("Segoe UI", 10))
     w = MainWindow()
     w.show()

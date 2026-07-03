@@ -36,7 +36,7 @@ class TestConstants:
     
     def test_max_workers(self, constants):
         """Threading ayarları doğru mu"""
-        assert constants.MAX_WORKERS == 50
+        assert 1 <= constants.MAX_WORKERS <= 20  # API rate-limit güvenli aralık
         assert constants.MAX_RETRIES == 3
     
     def test_ocr_settings(self, constants):

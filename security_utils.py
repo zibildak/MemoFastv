@@ -183,6 +183,25 @@ class SecurityValidator:
         return True
 
 
+def safe_extract_zip(zip_file, extract_dir):
+    """
+    ZIP arşivini Zip-Slip (path traversal) korumasıyla çıkarır.
+
+    Args:
+        zip_file: Açık zipfile.ZipFile nesnesi
+        extract_dir: Hedef klasör (str veya Path)
+
+    Raises:
+        ValueError: Arşiv, hedef klasör dışına yazan bir girdi içeriyorsa
+    """
+    extract_dir = Path(extract_dir).resolve()
+    for member in zip_file.namelist():
+        member_path = (extract_dir / member).resolve()
+        if extract_dir != member_path and extract_dir not in member_path.parents:
+            raise ValueError(f"Güvensiz ZIP girdisi engellendi: {member}")
+    zip_file.extractall(extract_dir)
+
+
 class CredentialSanitizer:
     """Remove sensitive data from logs and output"""
     

@@ -351,6 +351,17 @@ class CobraManager:
             translator = GoogleTranslator(source="auto", target=target_lang) if GoogleTranslator else None
 
         # İş listesi
+        # [YENİ] Kalıcı Global Çeviri Önbelleği (oyunlar arası, ücretsiz kullanım)
+        persist_cache = None
+        cache_hit_count = 0
+        try:
+            from translation_cache import TranslationCache
+            persist_cache = TranslationCache(target_lang=target_lang)
+            if len(persist_cache) > 0 and progress_callback:
+                progress_callback(f"💾 Kalıcı önbellek hazır: {len(persist_cache)} hazır çeviri mevcut.")
+        except Exception as e:
+            print(f"Kalıcı önbellek açılamadı (çeviri normal devam eder): {e}")
+
         work_items = []
         for i, row in enumerate(rows):
             if i == 0:
@@ -363,6 +374,12 @@ class CobraManager:
             if source in resume_dict:
                 rows[i][2] = resume_dict[source]
                 continue
+            if persist_cache:
+                cached_tr = persist_cache.get(source)
+                if cached_tr:
+                    rows[i][2] = cached_tr
+                    cache_hit_count += 1
+                    continue
             work_items.append((i, source))
 
         total = len(work_items)
@@ -415,6 +432,18 @@ class CobraManager:
                     pct = int((completed / total) * 100) if total else 100
                     if progress_callback:
                         progress_callback(f"⚡ Çevriliyor... ({completed}/{total}) - %{pct}")
+
+        # [YENİ] Yeni çevirileri kalıcı önbelleğe yaz
+        if persist_cache:
+            try:
+                for w_idx, w_src in work_items:
+                    if len(rows[w_idx]) > 2 and rows[w_idx][2]:
+                        persist_cache.set(w_src, rows[w_idx][2])
+                persist_cache.save()
+                if progress_callback and cache_hit_count:
+                    progress_callback(f"💾 {cache_hit_count} satır önbellekten geldi — API'ye hiç gitmedi!")
+            except Exception as e:
+                print(f"Önbellek kayıt hatası (çeviri etkilenmez): {e}")
 
         # Çevrilen CSV'yi yaz
         cleaned = []
