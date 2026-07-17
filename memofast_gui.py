@@ -2897,8 +2897,10 @@ class MainWindow(QMainWindow):
                 
                 import subprocess as _sp
                 self._agent_log_file = open(str(agent_log), "w", encoding="utf-8")
+                # -u (unbuffered): asistan logları agent.log'a anında yazılsın,
+                # yoksa tampon yüzünden log boş kalıp sorun teşhisi imkânsızlaşıyor.
                 self._agent_process = _sp.Popen(
-                    [str(venv_python), str(agent_main), "--headless"],
+                    [str(venv_python), "-u", str(agent_main), "--headless"],
                     cwd=str(agent_dir),
                     stdout=self._agent_log_file,
                     stderr=self._agent_log_file,
@@ -7871,13 +7873,27 @@ exit
         except Exception as mic_init_err:
             print(f"Mikrofonlar listelenemedi: {mic_init_err}")
             
+        # [FIX] Cihaz numaraları Windows'ta kayabildiği için önce KAYITLI İSME göre eşleştir.
+        # (Numara eski bir kayıttır; kulaklık takılıp çıktığında başka cihaza denk gelebilir.)
+        saved_mic_name = self.settings.get("microphone_device_name")
         saved_mic_idx = self.settings.get("microphone_device")
-        if saved_mic_idx is not None:
+        matched = False
+        if saved_mic_name:
+            for idx in range(self.mic_combo.count()):
+                if self.mic_combo.itemText(idx) == saved_mic_name:
+                    self.mic_combo.setCurrentIndex(idx)
+                    matched = True
+                    # Numara kaydıysa güncel numarayı sessizce düzelt
+                    if self.mic_combo.itemData(idx) != saved_mic_idx:
+                        self.settings["microphone_device"] = self.mic_combo.itemData(idx)
+                        self.save_settings()
+                    break
+        if not matched and saved_mic_idx is not None:
             for idx in range(self.mic_combo.count()):
                 if self.mic_combo.itemData(idx) == saved_mic_idx:
                     self.mic_combo.setCurrentIndex(idx)
                     break
-                    
+
         self.mic_combo.currentIndexChanged.connect(self.change_microphone)
         
         mic_layout.addWidget(mic_lbl)
