@@ -1,14 +1,14 @@
 {
-  "surum": "1.1.3",
+  "surum": "1.1.4",
   "notlar": [
-    "denemesürümü",
-    "denem",
-    "dene",
-    "dd"
+    "de",
+    "de",
+    "de",
+    "de"
   ],
-  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.1.3.zip",
-  "sha256": "b445af993bef5af850728b075320c09d00d12de6e7ff4a446f3277b7bb6ee7c7",
-  "boyut": 272319,
+  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.1.4.zip",
+  "sha256": "669c780f467a6362d46f6436aaf04dc1a5c04ec940f4153257358c9632f127e4",
+  "boyut": 272318,
   "tam_kurulum_gerekli": false,
   "site": "https://zibildak.github.io/MemoFastv"
 }
