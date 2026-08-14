@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MemoFast — Oyunlarını Türkçe Oyna</title>
+<meta name="description" content="MemoFast; Unreal, Unity ve daha fazlasını otomatik Türkçeye çevirir, yamalar ve optimize eder. Ücretsiz ve açık kaynak.">
+<link rel="icon" href="assets/app_icon.png">
+<meta property="og:title" content="MemoFast — Oyunlarını Türkçe Oyna">
+<meta property="og:description" content="Oyunlarını otomatik Türkçeye çevir, yamala, optimize et. Ücretsiz.">
+<meta property="og:image" content="assets/app_icon.png">
+<style>
+  :root{
+    --bg:#080b12; --bg2:#0c111b; --card:rgba(18,25,38,.72); --border:#1c2740;
+    --text:#e8eef7; --muted:#93a2b8; --emerald:#10b981; --azure:#26a9ff; --violet:#8b8cff;
+    --radius:18px;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:'Segoe UI',system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6; overflow-x:hidden;
+  }
+  a{color:inherit;text-decoration:none}
+  .wrap{max-width:1120px;margin:0 auto;padding:0 22px}
+
+  /* animated background glows */
+  .bg-fx{position:fixed;inset:0;z-index:-2;overflow:hidden;background:
+     radial-gradient(1200px 600px at 15% -10%, rgba(16,185,129,.18), transparent 60%),
+     radial-gradient(1000px 700px at 90% 0%, rgba(38,169,255,.16), transparent 55%),
+     radial-gradient(900px 600px at 50% 120%, rgba(139,140,255,.15), transparent 60%),
+     var(--bg);}
+  .orb{position:fixed;z-index:-1;border-radius:50%;filter:blur(70px);opacity:.5;animation:float 14s ease-in-out infinite}
+  .orb.a{width:340px;height:340px;background:#10b981;top:-60px;left:-40px}
+  .orb.b{width:300px;height:300px;background:#26a9ff;top:20%;right:-70px;animation-delay:-4s}
+  .orb.c{width:280px;height:280px;background:#8b8cff;bottom:-60px;left:35%;animation-delay:-8s}
+  @keyframes float{0%,100%{transform:translateY(0) translateX(0)}50%{transform:translateY(-38px) translateX(22px)}}
+  .grid-lines{position:fixed;inset:0;z-index:-1;
+    background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);
+    background-size:46px 46px;mask-image:radial-gradient(circle at 50% 30%,#000,transparent 75%)}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(12px);
+    background:rgba(8,11,18,.55);border-bottom:1px solid var(--border)}
+  .nav-in{display:flex;align-items:center;justify-content:space-between;height:64px}
+  .brand{display:flex;align-items:center;gap:11px;font-weight:800;font-size:19px;letter-spacing:.3px}
+  .brand img{width:34px;height:34px;border-radius:9px;box-shadow:0 0 18px rgba(16,185,129,.5)}
+  .nav-links{display:flex;gap:26px;align-items:center}
+  .nav-links a{color:var(--muted);font-size:15px;font-weight:600;transition:color .2s}
+  .nav-links a:hover{color:var(--text)}
+  .btn{display:inline-flex;align-items:center;gap:9px;font-weight:700;border-radius:12px;
+    padding:12px 22px;cursor:pointer;border:none;font-size:15px;transition:transform .15s,box-shadow .25s,background .25s}
+  .btn-main{background:linear-gradient(135deg,#10b981,#0ea5e9);color:#04121a;box-shadow:0 8px 26px rgba(16,185,129,.35)}
+  .btn-main:hover{transform:translateY(-2px);box-shadow:0 12px 34px rgba(16,185,129,.5)}
+  .btn-ghost{background:rgba(255,255,255,.05);color:var(--text);border:1px solid var(--border)}
+  .btn-ghost:hover{background:rgba(255,255,255,.09);transform:translateY(-2px)}
+  .nav .btn{padding:9px 16px;font-size:14px}
+
+  /* hero */
+  header{padding:90px 0 70px;text-align:center;position:relative}
+  .hero-logo{width:112px;height:112px;border-radius:26px;margin:0 auto 26px;display:block;
+    box-shadow:0 0 0 1px rgba(255,255,255,.06),0 20px 60px rgba(16,185,129,.35);animation:pulse 4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{transform:translateY(0);box-shadow:0 20px 60px rgba(16,185,129,.3)}50%{transform:translateY(-10px);box-shadow:0 30px 70px rgba(38,169,255,.45)}}
+  .pill{display:inline-flex;gap:8px;align-items:center;font-size:13px;font-weight:600;color:#9fe9cf;
+    background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);padding:6px 14px;border-radius:999px;margin-bottom:26px}
+  .dot{width:8px;height:8px;border-radius:50%;background:#10b981;box-shadow:0 0 10px #10b981;animation:blink 1.6s infinite}
+  @keyframes blink{50%{opacity:.35}}
+  h1{font-size:clamp(38px,7vw,74px);line-height:1.03;font-weight:900;letter-spacing:-1.5px;margin-bottom:22px}
+  .grad{background:linear-gradient(110deg,#10b981,#26a9ff,#8b8cff,#10b981);background-size:300% 100%;
+    -webkit-background-clip:text;background-clip:text;color:transparent;animation:shift 8s linear infinite}
+  @keyframes shift{to{background-position:300% 0}}
+  .sub{font-size:clamp(16px,2.2vw,20px);color:var(--muted);max-width:640px;margin:0 auto 38px}
+  .hero-btns{display:flex;gap:14px;justify-content:center;flex-wrap:wrap}
+  .hero-note{margin-top:18px;font-size:13px;color:var(--muted)}
+
+  /* stats */
+  .stats{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:56px}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:20px 26px;min-width:150px;backdrop-filter:blur(8px)}
+  .stat b{display:block;font-size:30px;font-weight:900;background:linear-gradient(120deg,#10b981,#26a9ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .stat span{font-size:13px;color:var(--muted)}
+
+  /* sections */
+  section{padding:70px 0}
+  .eyebrow{color:var(--emerald);font-weight:700;font-size:14px;letter-spacing:2px;text-transform:uppercase;text-align:center;margin-bottom:12px}
+  h2{font-size:clamp(28px,4.5vw,44px);font-weight:900;text-align:center;letter-spacing:-1px;margin-bottom:14px}
+  .lead{color:var(--muted);text-align:center;max-width:600px;margin:0 auto 50px;font-size:17px}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:28px;
+    backdrop-filter:blur(8px);transition:transform .25s,border-color .25s,box-shadow .25s;position:relative;overflow:hidden}
+  .card::before{content:"";position:absolute;inset:0;background:radial-gradient(400px 200px at var(--mx,50%) 0%,rgba(16,185,129,.1),transparent 60%);opacity:0;transition:opacity .3s}
+  .card:hover{transform:translateY(-6px);border-color:rgba(16,185,129,.5);box-shadow:0 18px 50px rgba(0,0,0,.4)}
+  .card:hover::before{opacity:1}
+  .ico{width:56px;height:56px;border-radius:15px;display:grid;place-items:center;font-size:28px;margin-bottom:18px;
+    background:linear-gradient(135deg,rgba(16,185,129,.2),rgba(38,169,255,.14));border:1px solid rgba(16,185,129,.25)}
+  .card h3{font-size:20px;font-weight:800;margin-bottom:9px}
+  .card p{color:var(--muted);font-size:15px}
+
+  /* engines strip */
+  .strip{display:flex;flex-wrap:wrap;gap:12px;justify-content:center}
+  .chip{background:var(--card);border:1px solid var(--border);border-radius:999px;padding:11px 22px;font-weight:700;font-size:15px;
+    display:flex;align-items:center;gap:9px;transition:transform .2s,border-color .2s}
+  .chip:hover{transform:translateY(-3px);border-color:rgba(38,169,255,.5)}
+  .chip .e{font-size:19px}
+
+  /* update highlight */
+  .split{display:grid;grid-template-columns:1.1fr 1fr;gap:44px;align-items:center}
+  .split h2{text-align:left}
+  .split .lead{text-align:left;margin:0 0 24px}
+  .feat-list{list-style:none;display:flex;flex-direction:column;gap:14px}
+  .feat-list li{display:flex;gap:12px;align-items:flex-start;font-size:16px}
+  .feat-list .ck{color:#04121a;background:#10b981;min-width:24px;height:24px;border-radius:7px;display:grid;place-items:center;font-weight:900;font-size:13px;margin-top:2px}
+  .mock{background:linear-gradient(160deg,#0f1626,#0b1018);border:1px solid var(--border);border-radius:20px;padding:26px;box-shadow:0 30px 70px rgba(0,0,0,.5)}
+  .mock-title{display:flex;align-items:center;gap:10px;font-weight:800;font-size:19px;margin-bottom:8px}
+  .mock-sub{color:var(--muted);font-size:14px;margin-bottom:16px}
+  .mock-notes{font-size:14px;color:#c7d2e0;margin-bottom:16px}
+  .mock-notes div{padding:3px 0}
+  .bar{height:10px;border-radius:6px;background:#1a2333;overflow:hidden;margin-bottom:18px}
+  .bar i{display:block;height:100%;width:70%;background:linear-gradient(90deg,#10b981,#26a9ff);border-radius:6px;animation:load 3s ease-in-out infinite}
+  @keyframes load{0%{width:8%}60%{width:88%}100%{width:8%}}
+  .mock-btns{display:flex;gap:10px}
+  .mock-btns .b1{flex:1;text-align:center;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:10px;padding:11px;font-size:14px;color:var(--muted)}
+  .mock-btns .b2{flex:1.6;text-align:center;background:linear-gradient(135deg,#10b981,#0ea5e9);color:#04121a;border-radius:10px;padding:11px;font-weight:800;font-size:14px}
+
+  /* download */
+  .dl-card{background:linear-gradient(160deg,rgba(16,185,129,.12),rgba(38,169,255,.08));
+    border:1px solid rgba(16,185,129,.3);border-radius:26px;padding:56px 32px;text-align:center;position:relative;overflow:hidden}
+  .dl-card h2{margin-bottom:10px}
+  .steps{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:36px}
+  .step{display:flex;align-items:center;gap:12px;background:rgba(8,11,18,.5);border:1px solid var(--border);border-radius:14px;padding:14px 20px;text-align:left}
+  .step b{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,#10b981,#26a9ff);color:#04121a;display:grid;place-items:center;font-weight:900}
+  .step span{font-size:14px;color:var(--muted)}
+  .step span b2{color:var(--text)}
+
+  /* footer */
+  footer{border-top:1px solid var(--border);padding:44px 0;margin-top:40px}
+  .foot{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:18px}
+  .foot .brand{font-size:17px}
+  .foot-links{display:flex;gap:22px}
+  .foot-links a{color:var(--muted);font-weight:600;font-size:15px;transition:color .2s}
+  .foot-links a:hover{color:var(--emerald)}
+  .copy{color:var(--muted);font-size:13px;width:100%;text-align:center;margin-top:22px;border-top:1px solid var(--border);padding-top:22px}
+
+  /* reveal */
+  .reveal{opacity:0;transform:translateY(28px);transition:opacity .7s cubic-bezier(.2,.7,.2,1),transform .7s cubic-bezier(.2,.7,.2,1)}
+  .reveal.in{opacity:1;transform:none}
+
+  @media(max-width:760px){
+    .nav-links{display:none}
+    .split{grid-template-columns:1fr;gap:32px}
+    .split h2,.split .lead{text-align:center}
+    header{padding:56px 0 40px}
+  }
+</style>
+</head>
+<body>
+<div class="bg-fx"></div>
+<div class="orb a"></div><div class="orb b"></div><div class="orb c"></div>
+<div class="grid-lines"></div>
+
+<nav>
+  <div class="wrap nav-in">
+    <div class="brand"><img src="assets/app_icon.png" alt="MemoFast"> MemoFast</div>
+    <div class="nav-links">
+      <a href="#ozellikler">Özellikler</a>
+      <a href="#motorlar">Motorlar</a>
+      <a href="#guncelleme">Güncelleme</a>
+      <a href="#indir">İndir</a>
+      <a href="https://www.youtube.com/@MehmetariTv" target="_blank" rel="noopener">YouTube</a>
+    </div>
+    <a class="btn btn-main" href="#indir">⬇ İndir</a>
+  </div>
+</nav>
+
+<header>
+  <div class="wrap">
+    <img class="hero-logo" src="assets/app_icon.png" alt="MemoFast">
+    <div class="pill"><span class="dot"></span> Ücretsiz &amp; Açık Kaynak · Windows</div>
+    <h1>Oyunlarını <span class="grad">Türkçe Oyna</span></h1>
+    <p class="sub">MemoFast; Unreal, Unity ve daha fazlasını <b>otomatik Türkçeye çevirir</b>, yamalar ve optimize eder. Kur, tara, çevir — gerisini o halleder.</p>
+    <div class="hero-btns">
+      <a class="btn btn-main" href="https://github.com/zibildak/MemoFastv/releases/latest" target="_blank" rel="noopener">⬇ Ücretsiz İndir</a>
+      <a class="btn btn-ghost" href="#ozellikler">Özellikleri Gör</a>
+    </div>
+    <p class="hero-note">Windows 10/11 · Kurulum gerektirmez · İçinde otomatik güncelleme var</p>
+
+    <div class="stats">
+      <div class="stat reveal"><b>6+</b><span>Oyun motoru</span></div>
+      <div class="stat reveal"><b>3</b><span>Çeviri motoru</span></div>
+      <div class="stat reveal"><b>OCR</b><span>Anlık ekran çevirisi</span></div>
+      <div class="stat reveal"><b>∞</b><span>Topluluk çevirisi</span></div>
+    </div>
+  </div>
+</header>
+
+<section id="ozellikler">
+  <div class="wrap">
+    <div class="eyebrow reveal">Neler yapabilir</div>
+    <h2 class="reveal">Tek uygulamada her şey</h2>
+    <p class="lead reveal">Oyununu tanır, doğru motoru seçer, metinleri çevirir ve güvenle yamalar. Teknik bilgi gerekmez.</p>
+    <div class="cards">
+      <div class="card reveal"><div class="ico">🎮</div><h3>Çoklu Motor Desteği</h3><p>Unreal (PAK + otomatik AES anahtarı), Unity (asset bundle & font), Cobra, RPG Maker, Ren'Py ve Godot oyunları.</p></div>
+      <div class="card reveal"><div class="ico">🌍</div><h3>Akıllı Çeviri</h3><p>Google Translate (hızlı & ücretsiz), DeepL (yüksek kalite) ve bağlam-duyarlı Gemini AI arasından seç.</p></div>
+      <div class="card reveal"><div class="ico">🖥️</div><h3>Ekran Çevirisi (OCR)</h3><p>Oyun içi metni anlık tanır ve çevirir. Windows OCR / Tesseract / EasyOCR, sesli okuma (TTS) ve kısayol tuşları.</p></div>
+      <div class="card reveal"><div class="ico">🔍</div><h3>Oyun Tarayıcı</h3><p>Steam, Epic Games, GOG ve Xbox kütüphanendeki oyunları otomatik bulur ve listeler.</p></div>
+      <div class="card reveal"><div class="ico">🤝</div><h3>Topluluk Havuzu</h3><p>Hazır çevirileri tek tıkla indir, kendi çevirini toplulukla paylaş. Herkes için sürekli büyüyen arşiv.</p></div>
+      <div class="card reveal"><div class="ico">💾</div><h3>Yedekleme Merkezi</h3><p>Orijinal dosyalar her zaman güvende. İstediğin an tek tıkla eski haline geri dön.</p></div>
+      <div class="card reveal"><div class="ico">🔄</div><h3>Otomatik Güncelleme</h3><p>Yeni sürüm çıkınca program söyler, tek tıkla iner. SHA-256 doğrulamalı, hatalıysa eski sürümü korur.</p></div>
+      <div class="card reveal"><div class="ico">⚡</div><h3>Optimizasyon</h3><p>Oyun performansını artıran araçlar; daha akıcı bir deneyim için ince ayarlar.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="motorlar">
+  <div class="wrap">
+    <div class="eyebrow reveal">Desteklenen teknolojiler</div>
+    <h2 class="reveal">Motorlar &amp; çeviri servisleri</h2>
+    <p class="lead reveal">Farklı oyun motorlarını ve en iyi çeviri servislerini tek çatı altında birleştirir.</p>
+    <div class="strip reveal" style="margin-bottom:20px">
+      <div class="chip"><span class="e">🕹️</span> Unreal Engine</div>
+      <div class="chip"><span class="e">🧩</span> Unity</div>
+      <div class="chip"><span class="e">🐍</span> Cobra</div>
+      <div class="chip"><span class="e">🎲</span> RPG Maker</div>
+      <div class="chip"><span class="e">📖</span> Ren'Py</div>
+      <div class="chip"><span class="e">🤖</span> Godot</div>
+    </div>
+    <div class="strip reveal">
+      <div class="chip"><span class="e">🟢</span> Google Translate</div>
+      <div class="chip"><span class="e">🔵</span> DeepL</div>
+      <div class="chip"><span class="e">✨</span> Gemini AI</div>
+    </div>
+  </div>
+</section>
+
+<section id="guncelleme">
+  <div class="wrap split">
+    <div>
+      <div class="eyebrow reveal" style="text-align:left">Kur, unut</div>
+      <h2 class="reveal">MemoFast kendini günceller</h2>
+      <p class="lead reveal">Bir daha "yeni sürüm var mı?" diye bakmana gerek yok. Program açılışta kontrol eder, yeni sürümü indirir, doğrular ve güvenle kurar — sonra kaldığın yerden devam edersin.</p>
+      <ul class="feat-list">
+        <li class="reveal"><span class="ck">✓</span> Açılışta arka planda otomatik kontrol</li>
+        <li class="reveal"><span class="ck">✓</span> Sadece değişen kod iner (koca paket değil)</li>
+        <li class="reveal"><span class="ck">✓</span> SHA-256 doğrulama + bozuksa otomatik geri alma</li>
+        <li class="reveal"><span class="ck">✓</span> Kurulum sonrası program kendini yeniden başlatır</li>
+      </ul>
+    </div>
+    <div class="mock reveal">
+      <div class="mock-title">🎉 Yeni sürüm hazır</div>
+      <div class="mock-sub">MemoFast — Güncelleme</div>
+      <div class="mock-notes">
+        <div>•  Yeni oyun motoru desteği</div>
+        <div>•  Çeviri hızı iyileştirildi</div>
+        <div>•  Hata düzeltmeleri</div>
+      </div>
+      <div class="bar"><i></i></div>
+      <div class="mock-btns"><div class="b1">Sonra</div><div class="b2">Güncelle ve Yeniden Başlat</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="indir">
+  <div class="wrap">
+    <div class="dl-card reveal">
+      <div class="eyebrow">Hazırsın</div>
+      <h2>MemoFast'i ücretsiz indir</h2>
+      <p class="lead" style="margin-bottom:30px">Windows 10/11 · Kurulum yok · Aç ve kullan. Topluluğa açık, tamamen ücretsiz.</p>
+      <a class="btn btn-main" style="font-size:17px;padding:16px 34px" href="https://github.com/zibildak/MemoFastv/releases/latest" target="_blank" rel="noopener">⬇ Son Sürümü İndir</a>
+      <div class="steps">
+        <div class="step"><b>1</b><span>ZIP dosyasını indir</span></div>
+        <div class="step"><b>2</b><span>Bir klasöre çıkar</span></div>
+        <div class="step"><b>3</b><span><b2 style="color:#e8eef7">start.bat</b2> ile çalıştır</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot">
+      <div class="brand"><img src="assets/app_icon.png" alt="MemoFast" style="width:30px;height:30px;border-radius:8px"> MemoFast</div>
+      <div class="foot-links">
+        <a href="https://github.com/zibildak/MemoFastv" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/zibildak/MemoFastv/releases/latest" target="_blank" rel="noopener">İndir</a>
+        <a href="https://www.youtube.com/@MehmetariTv" target="_blank" rel="noopener">YouTube</a>
+        <a href="https://github.com/zibildak/MemoFastv/blob/main/LICENSE" target="_blank" rel="noopener">MIT Lisans</a>
+      </div>
+    </div>
+    <div class="copy">© 2026 MemoFast · Oyun çeviri & optimizasyon aracı · Topluluk için ücretsiz yapıldı ❤️</div>
+  </div>
+</footer>
+
+<script>
+  // scroll reveal
+  const io=new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.12});
+  document.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transitionDelay=(i%6*60)+'ms';io.observe(el)});
+  // card glow follows cursor
+  document.querySelectorAll('.card').forEach(c=>{c.addEventListener('mousemove',e=>{const r=c.getBoundingClientRect();c.style.setProperty('--mx',(e.clientX-r.left)+'px')})});
+</script>
+</body>
+</html>
