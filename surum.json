@@ -1,14 +1,13 @@
 {
-  "surum": "1.1.4",
+  "surum": "1.1.6",
   "notlar": [
-    "de",
-    "ded",
-    "de",
-    "de"
+    "Cevirinin calismamasi sorunu giderildi (Google servisi devre disi kaliyordu)",
+    "Unreal ve Cobra motorlarinda bos ceviri hatasi duzeltildi",
+    "Yeni deep_translator surumleriyle uyumluluk saglandi"
   ],
-  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.1.4.zip",
-  "sha256": "6fdece4bfdd94bf84ece3e815361771ce3bce8766c376caf43f200195ec8ff9c",
-  "boyut": 272297,
+  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.1.6.zip",
+  "sha256": "387365cc59c7ca4bf022cc811c9f293bd3aa30545c87c22be2866bfefac6a436",
+  "boyut": 273400,
   "tam_kurulum_gerekli": false,
   "site": "https://zibildak.github.io/MemoFastv"
 }
