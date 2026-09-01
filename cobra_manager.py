@@ -52,11 +52,21 @@ if COBRA_TOOLS_PATH.exists():
         logger.warning("cobra-tools klasörü var ama import edilemedi. Fallback parser kullanılacak.")
 
 # --- Çeviri kütüphaneleri ---
+# [FIX] GoogleTranslator'ı DeepL'den ayrı import et — deep_translator >=1.9'da
+# 'DeepL' sınıfı 'DeeplTranslator' oldu; birlikte import edilince ImportError
+# GoogleTranslator'ı da None yapıp tüm çevirileri kırıyordu.
 try:
-    from deep_translator import GoogleTranslator, DeepL
+    from deep_translator import GoogleTranslator
 except ImportError:
     GoogleTranslator = None
-    DeepL = None
+
+try:
+    from deep_translator import DeepL
+except ImportError:
+    try:
+        from deep_translator import DeeplTranslator as DeepL  # yeni sürüm ismi
+    except ImportError:
+        DeepL = None
 
 # --- Unreal Manager'dan ortak araçları al ---
 try:

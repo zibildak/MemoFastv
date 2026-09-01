@@ -60,21 +60,26 @@ class UnityManager:
 
         target = Path(target_path)
         if target.is_file():
-            # Kullanıcı doğrudan .assets seçtiyse
+            # Kullanıcı doğrudan .assets veya .bundle seçtiyse
             files_to_process = [target]
         else:
             if progress_callback: progress_callback(f"Oyun klasörü taranıyor: {target.name} ...")
-            files_to_process = list(target.rglob("*.assets"))
+            files_to_process = list(target.rglob("*.assets")) + list(target.rglob("*.bundle"))
 
         total_translated = 0
         for f in files_to_process:
-            if f.stat().st_size > 300 * 1024 * 1024: # Skip files > 300MB
+            if f.stat().st_size > 2000 * 1024 * 1024: # Skip files > 2GB
                 continue
 
-            # I2Languages çevirisi dene
+            # 1. I2Languages çevirisi dene
             count = UnityManager._process_i2languages(f, service, api_key, progress_callback, target_lang, source_lang)
             if count > 0:
                 total_translated += count
+
+            # 2. TextAsset (JSON/XML/Diyalog) çevirisi dene
+            count_text = UnityManager._process_text_assets(f, service, api_key, progress_callback, target_lang, source_lang)
+            if count_text > 0:
+                total_translated += count_text
                 
         return total_translated
 
@@ -231,6 +236,7 @@ class UnityManager:
 
     @staticmethod
     def _process_i2languages(assets_path, service, api_key, progress_callback, target_lang, source_lang="en"):
+        import time
         try:
             env = UnityPy.load(str(assets_path))
             
@@ -251,7 +257,7 @@ class UnityManager:
                     except: pass
             
             if not obj:
-                if progress_callback: progress_callback("❌ Hata: Bu dosyada I2Languages tablosu bulunamadı. (Sadece TextAsset içeriyor olabilir, henüz desteklenmiyor).")
+                if progress_callback: progress_callback("❌ Hata: Bu dosyada I2Languages tablosu bulunamadı.")
                 return 0
                 
             raw_data = obj.get_raw_data()
@@ -294,12 +300,20 @@ class UnityManager:
             to_translate = []
             for idx, term in enumerate(terms):
                 trans_list = term["translations"]
+                # 1. Öncelikli kaynak dilden metni al
                 text = trans_list[source_idx] if source_idx < len(trans_list) else ""
                 
-                # Sadece hedef dil boşsa veya İngilizce ise çevir
+                # 2. Kaynak metin boşsa diğer dillerden dolu olan ilk metni bul
+                if not text or not isinstance(text, str) or not text.strip():
+                    for t_val in trans_list:
+                        if t_val and isinstance(t_val, str) and t_val.strip():
+                            text = t_val
+                            break
+
                 existing_target = trans_list[target_idx] if target_idx < len(trans_list) else ""
                 if text and isinstance(text, str) and text.strip():
-                    if not existing_target or existing_target == text:
+                    # Hedef dil boşsa, sadece boşluktan oluşuyorsa veya kaynak ile aynıysa çevir
+                    if not existing_target or not isinstance(existing_target, str) or not existing_target.strip() or existing_target == text:
                         to_translate.append((idx, text))
             
             total_to_translate = len(to_translate)
@@ -310,7 +324,7 @@ class UnityManager:
                 return 0
                 
             translated_count = 0
-            batch_size = 50
+            batch_size = 15  # Google API rate limit koruması için 15
             batches = [to_translate[i:i + batch_size] for i in range(0, len(to_translate), batch_size)]
             translator = GoogleTranslator(source=source_lang, target=target_lang)
             
@@ -322,35 +336,52 @@ class UnityManager:
                     protected_batch.append(protected_text)
                     batch_tags.append((term_idx, orig_text, tags))
                     
-                try:
-                    translated_batch = translator.translate_batch(protected_batch)
-                    for i, trans_text in enumerate(translated_batch):
-                        term_idx, orig_text, tags = batch_tags[i]
-                        if trans_text:
-                            final_text = UnityManager._restore_tags(trans_text, tags)
-                            final_text = UnityManager._to_english_chars(final_text)
-                            trans_list = terms[term_idx]["translations"]
-                            while len(trans_list) <= target_idx:
-                                trans_list.append("")
-                            trans_list[target_idx] = final_text
-                    translated_count += len(batch)
-                    if progress_callback: progress_callback(f"[{translated_count}/{total_to_translate}] Çevrildi. (Batch {b_idx+1}/{len(batches)})")
-                except Exception as ex:
-                    if progress_callback: progress_callback(f"Batch {b_idx+1} Hatası ({ex}). Tekli çeviri...")
+                batch_success = False
+                for attempt in range(2):
+                    try:
+                        translated_batch = translator.translate_batch(protected_batch)
+                        if translated_batch and len(translated_batch) == len(batch_tags):
+                            for i, trans_text in enumerate(translated_batch):
+                                term_idx, orig_text, tags = batch_tags[i]
+                                if trans_text:
+                                    final_text = UnityManager._restore_tags(trans_text, tags)
+                                    final_text = UnityManager._to_english_chars(final_text)
+                                    trans_list = terms[term_idx]["translations"]
+                                    while len(trans_list) <= target_idx:
+                                        trans_list.append("")
+                                    trans_list[target_idx] = final_text
+                            translated_count += len(batch)
+                            batch_success = True
+                            break
+                    except Exception:
+                        time.sleep(1.0)
+
+                if not batch_success:
+                    if progress_callback: progress_callback(f"Batch {b_idx+1} tekli çeviriye geçiliyor (Kota korumalı)...")
                     for term_idx, orig_text, tags in batch_tags:
-                        try:
-                            protected_text, tags = UnityManager._protect_tags(orig_text)
-                            trans_text = translator.translate(protected_text)
-                            if trans_text:
-                                final_text = UnityManager._restore_tags(trans_text, tags)
-                                final_text = UnityManager._to_english_chars(final_text)
-                                trans_list = terms[term_idx]["translations"]
-                                while len(trans_list) <= target_idx:
-                                    trans_list.append("")
-                                trans_list[target_idx] = final_text
-                            translated_count += 1
-                        except:
-                            translated_count += 1
+                        single_success = False
+                        for single_attempt in range(3):
+                            try:
+                                protected_text, tags = UnityManager._protect_tags(orig_text)
+                                trans_text = translator.translate(protected_text)
+                                if trans_text:
+                                    final_text = UnityManager._restore_tags(trans_text, tags)
+                                    final_text = UnityManager._to_english_chars(final_text)
+                                    trans_list = terms[term_idx]["translations"]
+                                    while len(trans_list) <= target_idx:
+                                        trans_list.append("")
+                                    trans_list[target_idx] = final_text
+                                    translated_count += 1
+                                    single_success = True
+                                    time.sleep(0.15)
+                                    break
+                            except Exception:
+                                time.sleep(0.8)
+                        if not single_success:
+                            if progress_callback: progress_callback(f"⚠️ Terim çevrilemedi: '{orig_text[:20]}...'")
+
+                if progress_callback: progress_callback(f"[{translated_count}/{total_to_translate}] Çevrildi. (Batch {b_idx+1}/{len(batches)})")
+                time.sleep(0.2)
                             
             # Kaydet
             if progress_callback: progress_callback(f"Unity paketi yeniden oluşturuluyor: {assets_path.name}")
@@ -371,3 +402,238 @@ class UnityManager:
         except Exception as e:
             if progress_callback: progress_callback(f"I2Languages işlenirken hata: {e}")
             return 0
+
+    @staticmethod
+    def _is_translatable_string(s, key_name=""):
+        if not s or not isinstance(s, str):
+            return False
+        s_strip = s.strip()
+        if len(s_strip) < 2:
+            return False
+        # Do not translate URLs or asset file paths
+        if s_strip.startswith(("http://", "https://", "ftp://")) or s_strip.endswith((".png", ".jpg", ".wav", ".mp3", ".prefab", ".asset", ".mat", ".mesh", ".unity3d")):
+            return False
+        # Do not translate 32-char hex GUIDs
+        if len(s_strip) == 32 and all(c in "0123456789abcdefABCDEF" for c in s_strip):
+            return False
+        # Skip technical keys if they are strict metadata like "guid", "hash", "url"
+        skip_strict_keys = {"guid", "hash", "url", "iso"}
+        if key_name and str(key_name).lower() in skip_strict_keys:
+            return False
+        # Must contain at least one letter
+        if not any(c.isalpha() for c in s_strip):
+            return False
+        return True
+
+    @staticmethod
+    def _translate_json_object(obj, translator, progress_callback=None, asset_name="", target_lang="tr"):
+        items_to_translate = []
+
+        def collect(container, key_or_index, value):
+            if isinstance(value, str):
+                if UnityManager._is_translatable_string(value, str(key_or_index)):
+                    items_to_translate.append((container, key_or_index, value))
+            elif isinstance(value, dict):
+                for k, v in value.items():
+                    collect(value, k, v)
+            elif isinstance(value, list):
+                for idx, item in enumerate(value):
+                    collect(value, idx, item)
+
+        if isinstance(obj, dict):
+            # Special handling for {"English": {...}} multi-language maps
+            if "English" in obj and isinstance(obj["English"], dict):
+                target_key = "Turkish" if target_lang == "tr" else target_lang.capitalize()
+                if target_key not in obj and "TR" not in obj:
+                    import copy
+                    obj[target_key] = copy.deepcopy(obj["English"])
+                actual_target = target_key if target_key in obj else ("TR" if "TR" in obj else "English")
+                for k, v in obj[actual_target].items():
+                    collect(obj[actual_target], k, v)
+            else:
+                for k, v in obj.items():
+                    collect(obj, k, v)
+        elif isinstance(obj, list):
+            for idx, item in enumerate(obj):
+                collect(obj, idx, item)
+
+        if not items_to_translate:
+            return 0
+
+        total = len(items_to_translate)
+        if progress_callback:
+            progress_callback(f"📝 {asset_name} (JSON/Diyalog): {total} metin çevriliyor...")
+
+        translated_count = 0
+        batch_size = 15
+        batches = [items_to_translate[i:i + batch_size] for i in range(0, len(items_to_translate), batch_size)]
+
+        import time
+        for batch in batches:
+            protected_batch = []
+            batch_tags = []
+            for container, k_idx, orig_text in batch:
+                prot_text, tags = UnityManager._protect_tags(orig_text)
+                protected_batch.append(prot_text)
+                batch_tags.append((container, k_idx, orig_text, tags))
+
+            batch_success = False
+            for attempt in range(2):
+                try:
+                    translated_batch = translator.translate_batch(protected_batch)
+                    if translated_batch and len(translated_batch) == len(batch_tags):
+                        for i, trans_text in enumerate(translated_batch):
+                            container, k_idx, orig_text, tags = batch_tags[i]
+                            if trans_text:
+                                final_text = UnityManager._restore_tags(trans_text, tags)
+                                final_text = UnityManager._to_english_chars(final_text)
+                                container[k_idx] = final_text
+                        translated_count += len(batch)
+                        batch_success = True
+                        break
+                except Exception:
+                    time.sleep(0.5)
+
+            if not batch_success:
+                for container, k_idx, orig_text, tags in batch_tags:
+                    try:
+                        prot_text, tags = UnityManager._protect_tags(orig_text)
+                        trans_text = translator.translate(prot_text)
+                        if trans_text:
+                            final_text = UnityManager._restore_tags(trans_text, tags)
+                            final_text = UnityManager._to_english_chars(final_text)
+                            container[k_idx] = final_text
+                            translated_count += 1
+                        time.sleep(0.1)
+                    except: pass
+
+            time.sleep(0.15)
+
+        return translated_count
+
+    @staticmethod
+    def _process_text_assets(assets_path, service, api_key, progress_callback, target_lang, source_lang="en"):
+        import time
+        try:
+            env = UnityPy.load(str(assets_path))
+            modified = False
+            total_count = 0
+            translator = GoogleTranslator(source=source_lang, target=target_lang)
+
+            for o in env.objects:
+                type_str = str(getattr(o, 'type', ''))
+                if hasattr(o.type, 'name'):
+                    type_str = o.type.name
+                elif type_str.startswith('ClassIDType.'):
+                    type_str = type_str.split('.')[-1]
+
+                if type_str != "TextAsset":
+                    continue
+
+                try:
+                    tree = o.read_typetree()
+                    if not tree or not tree.get("m_Script"):
+                        continue
+
+                    script_content = tree.get("m_Script")
+                    if isinstance(script_content, bytes):
+                        try:
+                            script_text = script_content.decode('utf-8', errors='ignore')
+                        except:
+                            continue
+                    else:
+                        script_text = str(script_content)
+
+                    if not script_text.strip():
+                        continue
+
+                    asset_name = tree.get("m_Name", "Unnamed")
+
+                    # Try parsing JSON first
+                    translated_in_asset = 0
+                    try:
+                        data = json.loads(script_text)
+                        translated_in_asset = UnityManager._translate_json_object(
+                            data, translator, progress_callback, asset_name, target_lang
+                        )
+                        if translated_in_asset > 0:
+                            new_text = json.dumps(data, ensure_ascii=False, indent=2)
+                            tree["m_Script"] = new_text
+                            o.save_typetree(tree)
+                            modified = True
+                            total_count += translated_in_asset
+                    except json.JSONDecodeError:
+                        pass
+
+                except Exception:
+                    continue
+
+            if modified:
+                if progress_callback: progress_callback(f"Unity paketi güncelleniyor: {assets_path.name}")
+                bak_path = assets_path.with_suffix(assets_path.suffix + ".bak")
+                if not bak_path.exists():
+                    import shutil
+                    shutil.copy2(assets_path, bak_path)
+                with open(assets_path, "wb") as f:
+                    f.write(env.file.save())
+
+            return total_count
+        except Exception as e:
+            if progress_callback: progress_callback(f"TextAsset işlenirken hata: {e}")
+            return 0
+
+    @staticmethod
+    def apply_turkish_font_fix(game_folder):
+        """
+        XUnity.AutoTranslator Config.ini dosyasını Türkçe karakterler için düzenler.
+        """
+        try:
+            game_path = Path(game_folder)
+            if game_path.is_file():
+                game_path = game_path.parent
+
+            config_path = game_path / "BepInEx" / "config" / "AutoTranslatorConfig.ini"
+            if not config_path.exists():
+                config_path = game_path / "UserData" / "AutoTranslatorConfig.ini"
+            if not config_path.exists():
+                config_path = game_path / "AutoTranslator" / "Config.ini"
+            if not config_path.exists():
+                return False, "AutoTranslatorConfig.ini bulunamadı!\nBepInEx veya MelonLoader kurulu değil."
+
+            with open(config_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+
+            behaviour_index = -1
+            for i, line in enumerate(lines):
+                if line.strip() == "[Behaviour]":
+                    behaviour_index = i
+                    break
+
+            if behaviour_index == -1:
+                lines.append("\n[Behaviour]\n")
+                behaviour_index = len(lines) - 2
+
+            font_settings = {
+                "OverrideFontTextMeshPro": "LiberationSans SDF",
+                "FallbackFontTextMeshPro": "LiberationSans SDF"
+            }
+
+            for key, value in font_settings.items():
+                found = False
+                for i in range(behaviour_index + 1, len(lines)):
+                    if lines[i].strip().startswith("["):
+                        break
+                    if lines[i].startswith(key + "="):
+                        lines[i] = f"{key}={value}\n"
+                        found = True
+                        break
+                if not found:
+                    lines.insert(behaviour_index + 1, f"{key}={value}\n")
+                    behaviour_index += 1
+
+            with open(config_path, 'w', encoding='utf-8') as f:
+                f.writelines(lines)
+
+            return True, "✅ Türkçe font desteği eklendi!\n\nKullanılan Font: LiberationSans SDF"
+        except Exception as e:
+            return False, f"İşlem sırasında hata oluştu: {e}"

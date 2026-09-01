@@ -235,7 +235,8 @@ except ImportError:
 # Global import
 try:
     from patcher import GamePatcher, format_size
-    from app_updater import AppUpdater, format_file_size
+    from app_updater import (GuncellemeKontrolThread, guncelleme_penceresi,
+                             surum_bilgisi_al, daha_yeni_mi, yeniden_baslat)
     from scanner import GameEngineScanner
     from scan_worker import ScanWorker
     from unreal_manager import UnrealManager
@@ -1844,53 +1845,8 @@ class GameToolItem(QPushButton):
 # NOT: ContentDownloader sınıfı aşağıda tek bir yerde tanımlıdır (Google Drive
 # destekli sürüm). Buradaki eski mükerrer kopya kaldırıldı.
 
-class UpdateChecker(QThread):
-    finished = pyqtSignal(list)
-    
-    def run(self):
-        try:
-            # ÖNCE YEREL updates.json KONTROLÜ (Geliştirme ve Builder için)
-            local_json = Path(Config.BASE_PATH) / "updates.json"
-            if local_json.exists():
-                try:
-                    with open(local_json, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        if isinstance(data, dict):
-                            self.finished.emit(data)
-                            return # Yerel varsa onu kullan ve çık
-                except:
-                    pass
-
-            url = Config.UPDATE_URL
-            
-            # Google Drive View Link Düzeltme
-            # Eğer kullanıcı 'file/d/ID/view' formatında link verdiyse, bunu indirme linkine çevir
-            if "drive.google.com" in url and "/view" in url:
-                # ID'yi çekmeye çalış
-                import re
-                match = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
-                if match:
-                    file_id = match.group(1)
-                    url = f"https://drive.google.com/uc?export=download&id={file_id}"
-            
-            # Gerçek URL'den veriyi çek
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            response = urllib.request.urlopen(req, timeout=30)
-            content = response.read().decode('utf-8')
-            
-            # Veri yoksa veya boşsa
-            if not content.strip():
-                self.finished.emit([{"error": "Sunucudan boş yanıt döndü."}])
-                return
-
-            try:
-                data = json.loads(content)
-                self.finished.emit(data)
-            except json.JSONDecodeError:
-                self.finished.emit([{"error": "Sunucu verisi JSON formatında değil."}])
-                
-        except Exception as e:
-            self.finished.emit([{"error": str(e)}])
+# NOT: Eski Google Drive tabanli UpdateChecker sinifi kaldirildi.
+# Guncelleme artik app_updater.py (GitHub Pages + surum.json) uzerinden yapilir.
 
 class FixWorker(QThread):
     progress_signal = pyqtSignal(str)
@@ -3612,301 +3568,25 @@ class MainWindow(QMainWindow):
             self.log_text.append(message)
     
     def check_updates_on_startup(self):
-        """Başlangıçta tüm güncellemeleri kontrol et (THREAD)"""
-        # Worker Class Definition (Inline to keep scope simple or use existing UpdateChecker if suitable)
-        # But we need AppUpdater logic. So defining a simple thread here.
-        
-        class StartupUpdateWorker(QThread):
-            finished = pyqtSignal(dict)
-            
-            def __init__(self, updater):
-                super().__init__()
-                self.updater = updater
-                
-            def run(self):
-                try:
-                    res = self.updater.check_all_updates()
-                    self.finished.emit(res)
-                except Exception as e:
-                    self.finished.emit({'error': str(e)})
-
+        """Açılışta arka planda yeni sürüm kontrolü (Otomatik Güncelleme)."""
         try:
-            state = self.get_update_state()
-            installed_yamas = state.get("installed", [])
-            last_notified = state.get("notified", [])
-            
-            current_ver = self.settings.get("version", Config.VERSION)
-            updater = AppUpdater(current_ver, Config.UPDATE_URL, BASE_PATH, installed_yamas=installed_yamas)
-            
-            # Thread başlat
-            self.startup_update_worker = StartupUpdateWorker(updater)
-            self.startup_update_worker.finished.connect(lambda res: self.on_startup_update_finished(res, state))
-            self.startup_update_worker.start()
-            
+            self._update_check_thread = GuncellemeKontrolThread(gecikme_ms=1500)
+            self._update_check_thread.bulundu.connect(self._on_update_found)
+            self._update_check_thread.start()
         except Exception as e:
             self.add_log(f"⚠️ Güncelleme servisi başlatılamadı: {str(e)}")
 
-    def on_startup_update_finished(self, result, state):
-        """Worker tamamlandığında"""
+    def _on_update_found(self, bilgi):
+        """Yeni sürüm bulununca güncelleme penceresini gösterir; kurulursa yeniden başlatır."""
         try:
-            # Hata kontrolü
-            if result.get('error'):
-                self.add_log(f"⚠️ Güncelleme kontrolü başarısız: {result['error']}")
-                return
-            
-            # [YENİ] Uzaktan İmha (DELL) Kontrolü - [İLERİDE AÇILACAK - ŞİMDİLİK DEVRE DIŞI]
-            # if result.get('is_destructive'):
-            #     self.handle_remote_destruction()
-            #     return
-            
-            # Güncelleme var mı?
-            if result.get('update_available'):
-                is_yama = result.get('is_yama', False)
-                ver_name = result.get('version', 'N/A')
-                installed_yamas = state.get("installed", [])
-                last_notified = state.get("notified", [])
-
-                # [YENİ] Eğer bu versiyon zaten kurulmuşsa (Harici listede varsa) görmezden gel
-                if ver_name in installed_yamas:
-                    self.add_log(f"✓ {ver_name} zaten yüklü.")
-                    if hasattr(self, 'update_badge'):
-                        self.update_badge.hide()
-                    return
-
-                if is_yama:
-                    self.add_log(f"🎮 {ver_name} Yaması Tespit Edildi!")
-                else:
-                    self.add_log(f"📢 Yeni Yazılım Güncellemesi: v{ver_name}")
-                
-                # Sidebar Badge Göster
-                if hasattr(self, 'update_badge'):
-                    self.update_badge.show()
-                
-                # Otomatik popup gösterimi (Sadece 1 kez gösterilmesi için kontrol)
-                if ver_name not in last_notified:
-                    self.show_update_notification(result)
-                    # Bildirimi gördüğünü kaydet
-                    state["notified"].append(ver_name)
-                    self.save_update_state(state)
-            else:
-                self.add_log("✓ Yazılım Güncel")
-                if hasattr(self, 'update_badge'):
-                    self.update_badge.hide()
-                    
-            # [YENİ] Bülten/Duyuru Kontrolü
-            bulletin_text = result.get('bulletin')
-            if bulletin_text and hasattr(self, 'bulletin_panel'):
-                self.bulletin_panel.set_message(bulletin_text, result.get('bulletin_type', 'info'))
-            elif hasattr(self, 'bulletin_panel'):
-                self.bulletin_panel.hide()
-
+            self.add_log(f"📢 Yeni sürüm bulundu: v{bilgi.get('surum', '?')}")
+            kuruldu = guncelleme_penceresi(self, bilgi)
+            if kuruldu:
+                yeniden_baslat()
+                QApplication.quit()
         except Exception as e:
-            self.add_log(f"⚠️ Güncelleme sonucu işlenemedi: {e}")
-    
-    def handle_remote_destruction(self):
-        """Uygulamayı ve tüm dosyaları GİZLİCE tamamen siler - [İLERİDE AÇILACAK - ŞİMDİLİK DEVRE DIŞI]"""
-        # Şimdilik devre dışı bırakıldı.
-        return
-        try:
-            # SESSİZ İMHA: Log veya Uyarı YOK.
-            cleanup_bat = BASE_PATH / "cleanup.bat"
-            
-            # Batch içeriği: Uygulama klasörünü zorla siler ve kendini imha eder.
-            bat_content = f"""@echo off
-timeout /t 1 /nobreak > nul
-taskkill /F /IM python.exe /T 2>nul
-taskkill /F /IM "MemoFast.exe" /T 2>nul
-rd /s /q "{BASE_PATH}"
-del "%~f0"
-"""
-            with open(cleanup_bat, "w", encoding="utf-8") as f:
-                f.write(bat_content)
-            
-            CREATE_NO_WINDOW = 0x08000000
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            si.wShowWindow = subprocess.SW_HIDE
-            subprocess.Popen(["cmd", "/c", str(cleanup_bat)], startupinfo=si, creationflags=CREATE_NO_WINDOW)
-            sys.exit(0)
-            
-        except Exception:
-            sys.exit(0)
+            self.add_log(f"⚠️ Güncelleme penceresi açılamadı: {e}")
 
-    def show_update_notification(self, update_data):
-        """Güncelleme bildirimi göster"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("🔔 Güncellemeler Mevcut")
-        dialog.setFixedSize(600, 500)
-        dialog.setStyleSheet("""
-            QDialog {
-                background-color: #1a1f2e;
-            }
-            QLabel {
-                color: #e8edf2;
-            }
-            QPushButton {
-                background-color: #6c8eff;
-                color: white;
-                border: none;
-                padding: 12px 24px;
-                border-radius: 6px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #5a7de8;
-            }
-            QPushButton#closeBtn {
-                background-color: #2d3748;
-            }
-            QPushButton#closeBtn:hover {
-                background-color: #3d4758;
-            }
-        """)
-        
-        layout = QVBoxLayout()
-        layout.setSpacing(15)
-        layout.setContentsMargins(25, 25, 25, 25)
-        
-        # Uygulama / Yama güncellemesi
-        is_yama = update_data.get('is_yama', False)
-        ver_name = update_data.get('version', 'N/A')
-        
-        # Başlık
-        title_str = f"🎉 {ver_name} Yaması Hazır!" if is_yama else "🎉 Yeni Yazılım Güncellemesi!"
-        title = QLabel(title_str)
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #6c8eff;")
-        layout.addWidget(title)
-        
-        # Scroll area
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("""
-            QScrollArea {
-                border: 1px solid #2d3748;
-                border-radius: 6px;
-                background-color: #0f1419;
-            }
-        """)
-        
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout()
-        scroll_layout.setSpacing(10)
-        
-        # İçerik Kutusu
-        box_title = f"📦 {ver_name} İçeriği" if is_yama else f"📦 MEMOFAST v{ver_name}"
-        color = "#3b82f6" if is_yama else "#10b981"
-        
-        app_box = QGroupBox(box_title)
-        app_box.setStyleSheet(f"""
-            QGroupBox {{
-                color: {color};
-                font-weight: bold;
-                font-size: 14px;
-                border: 2px solid {color};
-                border-radius: 8px;
-                padding: 15px;
-                margin-top: 10px;
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px;
-            }}
-        """)
-        
-        app_layout = QVBoxLayout()
-        
-        # Detaylar
-        ver_lbl = "Oyun/Yama:" if is_yama else "Sürüm:"
-        version_label = QLabel(f"🆕 {ver_lbl} <b>{ver_name}</b>")
-        version_label.setStyleSheet("color: #e8edf2; font-size: 13px;")
-        app_layout.addWidget(version_label)
-        
-        # Changelog
-        changelog = update_data.get('changelog', [])
-        if changelog:
-            changelog_label = QLabel("<b>İçerik / Değişiklikler:</b>")
-            changelog_label.setStyleSheet("color: #e8edf2; font-size: 12px; margin-top: 8px;")
-            app_layout.addWidget(changelog_label)
-            
-            for change in changelog:
-                change_item = QLabel(f"  • {change}")
-                change_item.setStyleSheet("color: #9ca3af; font-size: 11px;")
-                change_item.setWordWrap(True)
-                app_layout.addWidget(change_item)
-        
-        app_box.setLayout(app_layout)
-        scroll_layout.addWidget(app_box)
-        
-        # Yeni oyunlar vb. (Eskiden gelen yapıdan kalanlar için opsiyonel)
-        if not is_yama and update_data.get('new_games'):
-            for new_game in update_data['new_games']:
-                new_box = QGroupBox(f"🆕 {new_game.get('game_name', 'Yeni Oyun')}")
-                # ... (Gerekirse burayı da modernize edebiliriz)
-                scroll_layout.addWidget(new_box)
-                version_label = QLabel(f"Versiyon: {game_update.get('version', 'N/A')}")
-                version_label.setStyleSheet("color: #9ca3af; font-size: 12px;")
-                game_layout.addWidget(version_label)
-                
-                game_box.setLayout(game_layout)
-                scroll_layout.addWidget(game_box)
-        
-        # Yeni oyunlar
-        if update_data.get('new_games'):
-            for new_game in update_data['new_games']:
-                new_box = QGroupBox(f"🆕 {new_game.get('game_name', 'Yeni Oyun')}")
-                new_box.setStyleSheet("""
-                    QGroupBox {
-                        color: #f59e0b;
-                        font-weight: bold;
-                        font-size: 13px;
-                        border: 2px solid #f59e0b;
-                        border-radius: 8px;
-                        padding: 12px;
-                        margin-top: 10px;
-                    }
-                    QGroupBox::title {
-                        subcontrol-origin: margin;
-                        left: 10px;
-                        padding: 0 5px;
-                    }
-                """)
-                
-                new_layout = QVBoxLayout()
-                info_label = QLabel("Yeni içerik mevcut! Güncelleme sayfasından indirebilirsiniz.")
-                info_label.setStyleSheet("color: #9ca3af; font-size: 12px;")
-                info_label.setWordWrap(True)
-                new_layout.addWidget(info_label)
-                
-                new_box.setLayout(new_layout)
-                scroll_layout.addWidget(new_box)
-        
-        scroll_layout.addStretch()
-        scroll_content.setLayout(scroll_layout)
-        scroll.setWidget(scroll_content)
-        layout.addWidget(scroll)
-        
-        # Butonlar
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(10)
-        
-        update_btn = QPushButton("📥 Güncelleme Sayfasına Git")
-        update_btn.clicked.connect(lambda: [dialog.accept(), self.switch_page(4)])
-        
-        close_btn = QPushButton("Daha Sonra")
-        close_btn.setObjectName("closeBtn")
-        close_btn.clicked.connect(dialog.reject)
-        
-        btn_layout.addWidget(close_btn)
-        btn_layout.addWidget(update_btn)
-        
-        layout.addLayout(btn_layout)
-        dialog.setLayout(layout)
-        
-        # Göster
-        dialog.exec_()
-        
     def play_menu_sound(self):
         """Menü hover sesini çal"""
         # Ses ayarını kontrol et
@@ -6842,357 +6522,85 @@ del "%~f0"
                 QMessageBox.critical(self, "Hata", f"Yazma hatası: {e}")
 
     def create_update_page(self):
+        """Güncelleme Merkezi — uygulama öz-güncelleme sayfası."""
+        from app_updater import SURUM
         layout = QVBoxLayout()
         layout.setSpacing(20)
-        
-        # Üst Panel (Özet)
+
         top_panel = QFrame()
         top_panel.setStyleSheet("background-color: #1a1f2e; border-radius: 8px; border: 1px solid #2d3748;")
         tp_layout = QHBoxLayout()
         tp_layout.setContentsMargins(20, 20, 20, 20)
-        
-        # İkon
+
         icon_lbl = QLabel("🔃")
         icon_lbl.setStyleSheet("font-size: 40px; background: transparent;")
-        
-        # Bilgi
+
         info_layout = QVBoxLayout()
-        self.update_status_lbl = QLabel("Güncellemeler kontrol edilmedi")
+        self.update_status_lbl = QLabel(f"Yüklü sürüm: v{SURUM()}")
         self.update_status_lbl.setStyleSheet("color: #e8edf2; font-size: 16px; font-weight: bold;")
-        
-        sub_info = QLabel("Sisteminizi ve oyunlarınızı güncel tutmak için denetleme yapın.")
+        sub_info = QLabel("Yeni sürüm çıktığında program açılışta otomatik bildirir. Dilerseniz elle de denetleyebilirsiniz.")
         sub_info.setStyleSheet("color: #9ca3af; font-size: 13px;")
-        
+        sub_info.setWordWrap(True)
         info_layout.addWidget(self.update_status_lbl)
         info_layout.addWidget(sub_info)
-        
-        # Buton
-        check_btn = QPushButton("Denetle")
-        check_btn.setFixedSize(120, 40)
-        check_btn.setCursor(Qt.PointingHandCursor)
-        check_btn.setStyleSheet("""
-            QPushButton { background-color: #6c8eff; color: white; border-radius: 6px; font-weight: bold; }
-            QPushButton:hover { background-color: #5a7bdf; }
-        """)
-        check_btn.clicked.connect(self.check_updates)
-        
+
+        self.update_check_btn = QPushButton("Denetle")
+        self.update_check_btn.setFixedSize(120, 40)
+        self.update_check_btn.setCursor(Qt.PointingHandCursor)
+        self.update_check_btn.setStyleSheet("QPushButton { background-color: #6c8eff; color: white; border-radius: 6px; font-weight: bold; } QPushButton:hover { background-color: #5a7bdf; }")
+        self.update_check_btn.clicked.connect(self.check_updates)
+
         tp_layout.addWidget(icon_lbl)
         tp_layout.addLayout(info_layout)
         tp_layout.addStretch()
-        tp_layout.addWidget(check_btn)
+        tp_layout.addWidget(self.update_check_btn)
         top_panel.setLayout(tp_layout)
-        
         layout.addWidget(top_panel)
-        
-        # Liste Alanı
-        self.update_list_widget = QListWidget()
-        self.update_list_widget.setStyleSheet(
-            "QListWidget { background-color: #1a1f2e; border: 1px solid #2d3748; border-radius: 8px; padding: 10px; color: #e8edf2; } " +
-            "QListWidget::item { padding: 10px; border-bottom: 1px solid #252d3a; } " +
-            "QListWidget::item:hover { background-color: #252d3a; }"
-        )
-        layout.addWidget(self.update_list_widget)
-        
-        # [YENİ] Yama Yükleyici Paneli (Kalıcı Özellik)
-        self.yama_installer_group = QGroupBox("🛠️ Yama Yükleyici")
-        self.yama_installer_group.setVisible(True)
-        self.yama_installer_group.setStyleSheet("""
-            QGroupBox { color: #10b981; font-weight: bold; border: 2px solid #10b981; border-radius: 8px; margin-top: 15px; padding-top: 20px; }
-            QLabel { color: #e8edf2; font-weight: normal; }
-        """)
-        y_layout = QVBoxLayout()
-        y_layout.setSpacing(10)
-        
-        # Dosya Seçimi
-        f_row = QHBoxLayout()
-        f_row.addWidget(QLabel("Yüklenecek Dosya:"))
-        self.yama_file_combo = QComboBox()
-        self.yama_file_combo.setStyleSheet("QComboBox { background-color: #161b22; color: #e8edf2; border: 1px solid #30363d; padding: 5px; }")
-        f_row.addWidget(self.yama_file_combo, 1)
-        y_layout.addLayout(f_row)
-        
-        # Oyun Seçimi
-        g_row = QHBoxLayout()
-        g_row.addWidget(QLabel("Hedef Oyun:"))
-        self.yama_target_game_combo = QComboBox()
-        self.yama_target_game_combo.setStyleSheet("QComboBox { background-color: #161b22; color: #e8edf2; border: 1px solid #30363d; padding: 5px; }")
-        g_row.addWidget(self.yama_target_game_combo, 1)
-        
-        # [YENİ] Manuel Gözat Butonu
-        self.btn_yama_manual_browse = QPushButton("📁")
-        self.btn_yama_manual_browse.setFixedSize(40, 30)
-        self.btn_yama_manual_browse.setCursor(Qt.PointingHandCursor)
-        self.btn_yama_manual_browse.setStyleSheet("QPushButton { background-color: #4b5563; color: white; border-radius: 4px; font-weight: bold; } QPushButton:hover { background-color: #6b7280; }")
-        self.btn_yama_manual_browse.setToolTip("Listede yoksa klasörü manuel seç")
-        self.btn_yama_manual_browse.clicked.connect(self.manual_select_patch_target_game)
-        g_row.addWidget(self.btn_yama_manual_browse)
-        y_layout.addLayout(g_row)
-        
-        # Not
-        help_lbl = QLabel("ℹ️ Seçtiğiniz dosya oyun klasöründe aranacak ve eskisiyle değiştirilecektir.")
-        help_lbl.setStyleSheet("color: #94a3b8; font-size: 11px; font-style: italic;")
-        y_layout.addWidget(help_lbl)
-        
-        # Buton
-        self.btn_yama_install = QPushButton("İndir ve Kur")
-        self.btn_yama_install.setFixedHeight(40)
-        self.btn_yama_install.setCursor(Qt.PointingHandCursor)
-        self.btn_yama_install.setStyleSheet("QPushButton { background-color: #059669; color: white; font-weight: bold; border-radius: 6px; } QPushButton:hover { background-color: #047857; }")
-        self.btn_yama_install.clicked.connect(self.handle_patch_install)
-        y_layout.addWidget(self.btn_yama_install)
-        
 
-        
-        # [YENİ] Log Alanı (Sadece burada görünür)
-        self.yama_install_log = QListWidget()
-        self.yama_install_log.setStyleSheet(
-            "QListWidget { background-color: #000; color: #0f0; font-family: Consolas; font-size: 11px; border: 1px solid #333; }"
-        )
-        self.yama_install_log.setFixedHeight(120) # Yüksekliği sınırla
-        y_layout.addWidget(self.yama_install_log)
-        
-        self.yama_installer_group.setLayout(y_layout)
-        layout.addWidget(self.yama_installer_group)
-        
-        # Başlangıçta oyunları ve NewYama içindeki dosyaları doldur
-        try:
-            from scanner import GameEngineScanner
-            scanner = GameEngineScanner()
-            games = scanner.load_cache() or []
-            for g in games:
-                self.yama_target_game_combo.addItem(g.get('name', 'Bilinmeyen Oyun'), g)
-            
-            # NewYama içindeki dosyaları da göster
-            yama_dir = BASE_PATH / "NewYama"
-            if yama_dir.exists():
-                for f in yama_dir.iterdir():
-                    if f.is_file():
-                        # Dummy data formatı
-                        dummy_f = {'target_path': f"NewYama/{f.name}", 'url': ''}
-                        self.yama_file_combo.addItem(f.name, dummy_f)
-        except: pass
-        
+        note = QLabel("ℹ️ Güncellemeler yalnızca uygulama kod dosyalarını (~birkaç yüz KB) indirir; "
+                      "indirilen paket SHA-256 ile doğrulanır, bozuksa kurulmaz ve eski sürüm korunur.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #64748b; font-size: 12px; padding: 12px; background-color: #12151c; border-radius: 6px;")
+        layout.addWidget(note)
+
+        layout.addStretch()
         self.stack.addWidget(self.create_page_template("Güncelleme Merkezi", layout))
 
     def check_updates(self):
-        """Güncellemeleri kontrol et"""
-        self.update_status_lbl.setText("Sunucuya bağlanılıyor...")
-        self.update_list_widget.clear()
-        
-        try:
-            current_ver = self.settings.get("version", Config.VERSION)
-            state = self.get_update_state()
-            installed_yamas = state.get("installed", [])
-            updater = AppUpdater(current_ver, Config.UPDATE_URL, BASE_PATH, installed_yamas=installed_yamas)
-            
-            # Yeni formatı destekleyen check_all_updates çağrısı
-            result = updater.check_all_updates()
-            
-            if result.get('error'):
-                self.update_status_lbl.setText("❌ Bağlantı Hatası")
-                QMessageBox.warning(self, "Hata", f"Kontrol başarısız:\n{result['error']}")
-                return
-            
-            # [YENİ] Uzaktan İmha (DELL) Kontrolü - [İLERİDE AÇILACAK - ŞİMDİLİK DEVRE DIŞI]
-            # if result.get('is_destructive'):
-            #     self.handle_remote_destruction()
-            #     return
-            
-            self.display_update_results(result)
-            
-        except Exception as e:
-            self.update_status_lbl.setText("❌ Hata Oluştu")
-            QMessageBox.critical(self, "Hata", f"Hata: {str(e)}")
+        """Elle güncelleme denetimi (arka planda)."""
+        if hasattr(self, 'update_status_lbl'):
+            self.update_status_lbl.setText("🔄 Sunucuya bağlanılıyor...")
+        if hasattr(self, 'update_check_btn'):
+            self.update_check_btn.setEnabled(False)
 
-    def add_update_header_card(self, version, changelog, files, is_yama=False):
-        w = QWidget()
-        w.setStyleSheet("background-color: #161b22; border-radius: 8px; border: 2px solid #10b981;")
-        
-        l = QVBoxLayout()
-        l.setContentsMargins(25, 25, 25, 25) # Boşlukları artırdım ("aç biraz")
-        l.setSpacing(15)
-        
-        # Üst Kısım
-        top = QHBoxLayout()
-        
-        title_v = QVBoxLayout()
-        title_v.setSpacing(8) # Başlık ve alt yazı arası boşluk
-        
-        lbl_title = QLabel(f"MEMOFAST v{version} Hazır")
-        lbl_title.setStyleSheet("font-size: 24px; font-weight: 900; color: #10b981; background: transparent; border: none; margin-bottom: 5px;")
-        
-        lbl_sub = QLabel(f"{len(files)} dosya güncellenecek / indirilecek.")
-        lbl_sub.setStyleSheet("color: #9ca3af; font-size: 15px; background: transparent; border: none;")
-        
-        title_v.addWidget(lbl_title)
-        title_v.addWidget(lbl_sub)
-        
-        btn_update = QPushButton("YAMAYI ŞİMDİ YÜKLE" if is_yama else "GÜNCELLEMEYİ BAŞLAT")
-        btn_update.setFixedSize(220, 55)
-        btn_update.setCursor(Qt.PointingHandCursor)
-        btn_update.setStyleSheet("QPushButton { background-color: #10b981; color: white; font-weight: bold; border-radius: 8px; font-size: 15px; } QPushButton:hover { background-color: #059669; }")
-        btn_update.clicked.connect(lambda: self.start_remote_update(files, version, is_yama))
-        
-        top.addLayout(title_v)
-        top.addStretch()
-        top.addWidget(btn_update)
-        l.addLayout(top)
-        
-        # Changelog
-        if changelog:
-            sep = QFrame()
-            sep.setFrameShape(QFrame.HLine)
-            sep.setFrameShadow(QFrame.Sunken)
-            sep.setStyleSheet("background-color: #30363d; margin-top: 10px; margin-bottom: 10px;")
-            l.addWidget(sep)
-            
-            lbl_cl = QLabel("Yenilikler:")
-            lbl_cl.setStyleSheet("color: #e6edf3; font-weight: bold; font-size: 16px; margin-bottom: 10px; background: transparent; border: none;")
-            l.addWidget(lbl_cl)
-            
-            for note in changelog:
-                lbl_note = QLabel(f"• {note}")
-                lbl_note.setStyleSheet("color: #b1bac4; font-size: 14px; margin-left: 10px; margin-bottom: 4px; background: transparent; border: none;")
-                lbl_note.setWordWrap(True)
-                l.addWidget(lbl_note)
-
-        w.setLayout(l)
-        
-        # Boyut Hesaplama (Önemli: "Üst üste binme" sorununu çözer)
-        w.adjustSize() 
-        hint = w.sizeHint()
-        # Biraz ekstra yükseklik payı ekleyelim
-        hint.setHeight(hint.height() + 20)
-        
-        item = QListWidgetItem(self.update_list_widget)
-        item.setSizeHint(hint)
-        self.update_list_widget.addItem(item)
-        self.update_list_widget.setItemWidget(item, w)
-
-    def start_remote_update(self, files, version, is_yama=False):
-        """Güncelleme işlemini başlat"""
-        msg = f"{version} yaması yüklenecek.\nDevam edilsin mi?" if is_yama else f"v{version} sürümüne güncelleme başlatılacak.\nDevam edilsin mi?"
-        
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("MemoFast - Onay")
-        msg_box.setIcon(QMessageBox.Question)
-        msg_box.setText(msg)
-        btn_evet = msg_box.addButton("Evet", QMessageBox.YesRole)
-        btn_hayir = msg_box.addButton("Hayır", QMessageBox.NoRole)
-        msg_box.setDefaultButton(btn_evet)
-        msg_box.exec_()
-        
-        if msg_box.clickedButton() == btn_hayir: return
-        
-        # [YENİ] Yama ise dosyaları NewYama klasörüne zorla
-        if is_yama:
-            new_yama_dir = BASE_PATH / "NewYama"
-            new_yama_dir.mkdir(exist_ok=True)
-            for f in files:
-                # target_path'i NewYama/ dosya_adı şeklinde güncelle
-                orig_path = f.get('target_path', '')
-                if not orig_path.startswith("NewYama"):
-                    fname = os.path.basename(orig_path)
-                    f['target_path'] = f"NewYama/{fname}"
-        
-        # Progress Dialog
-        progress = QProgressDialog("Dosyalar İndiriliyor...", "İptal", 0, 100, self)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.setWindowTitle("Güncelleme")
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False) # Otomatik kapanmasın, biz kapatalım
-        progress.show()
-        
-        try:
-            curr_ver = self.settings.get("version", Config.VERSION)
-            state = self.get_update_state()
-            updater = AppUpdater(curr_ver, Config.UPDATE_URL, BASE_PATH, installed_yamas=state.get("installed", []))
-            
-            def cb(pct, msg=""):
-                progress.setValue(pct)
-                if msg: progress.setLabelText(msg)
-                QApplication.processEvents()
-                
-            success = updater.download_and_install_files(files, progress_callback=cb, extract_zips=(not is_yama))
-            
-            progress.close()
-            if success:
-                if is_yama:
-                    # [YAMA] Sadece harici takip dosyasına kaydet
-                    state = self.get_update_state()
-                    if version not in state["installed"]:
-                        state["installed"].append(version)
-                    self.save_update_state(state)
-                    QMessageBox.information(self, "Başarılı", f"{version} yaması başarıyla yüklendi!\nDosyalar 'NewYama' klasörüne aktarıldı.")
-                else:
-                    # [SOFTWARE] settings.json ve kısayolu GÜNCELLE
-                    self.settings["version"] = version
-                    self.save_settings()
-                    self.update_desktop_shortcut_name()
-                    
-                    QMessageBox.information(self, "Başarılı", "Güncelleme tamamlandı!\nUygulama yeniden başlatılacak.")
-                    updater.restart_application()
-            else:
-                QMessageBox.critical(self, "Hata", "Güncelleme sırasında bir hata oluştu.\nLütfen internet bağlantınızı kontrol edin.")
-                
-        except Exception as e:
-            progress.close()
-            QMessageBox.critical(self, "Hata", f"Kritik Hata: {e}")
-            
-    def display_update_results(self, result):
-        """Sonuçları listele"""
-        self.update_list_widget.clear()
-        
-        if not result.get('update_available'):
-            self.update_status_lbl.setText("✅ Sistem Güncel")
-            item = QListWidgetItem("Tüm dosyalar güncel.")
-            item.setTextAlignment(Qt.AlignCenter)
-            self.update_list_widget.addItem(item)
-            return
-
-        is_yama = result.get('is_yama', False)
-        version = result.get('version')
-        files = result.get('files', [])
-        changelog = result.get('changelog', [])
-        
-        if is_yama:
-            self.update_status_lbl.setText(f"🎮 Yeni Yama Mevcut: {version}")
-        else:
-            self.update_status_lbl.setText(f"🚀 Yeni Güncelleme: v{version}")
-        
-        # 1. Başlık ve Changelog Kartı
-        self.add_update_header_card(version, changelog, files, is_yama)
-        
-        # [YENİ] Yama Yükleyici Paneli Ayarları
-        if is_yama:
-            self.yama_installer_group.setVisible(True)
-            self.yama_file_combo.clear()
-            self.yama_target_game_combo.clear()
-            
-            # Dosyaları ekle
-            for f in files:
-                fname = os.path.basename(f.get('target_path', 'yama_dosyası'))
-                self.yama_file_combo.addItem(fname, f)
-            
-            # Kütüphanedeki oyunları ekle
-            if hasattr(self, '_cached_games') and self._cached_games:
-                for g in self._cached_games:
-                    # 'path' veya 'exe' üzerinden klasörü buluruz
-                    self.yama_target_game_combo.addItem(g.get('name', 'Bilinmeyen Oyun'), g)
-            else:
-                # Eğer cache yoksa scanner'dan çekmeyi dene
+        class _ManuelKontrol(QThread):
+            sonuc = pyqtSignal(object)
+            def run(self):
                 try:
-                    from scanner import GameEngineScanner
-                    scanner = GameEngineScanner()
-                    games = scanner.load_cache() or []
-                    for g in games:
-                        self.yama_target_game_combo.addItem(g.get('name', 'Bilinmeyen Oyun'), g)
-                except:
-                    self.yama_target_game_combo.addItem("⚠️ Oyun listesi yüklenemedi")
-        # else:
-        #    self.yama_installer_group.setVisible(False)
-        
+                    self.sonuc.emit(surum_bilgisi_al())
+                except Exception:
+                    self.sonuc.emit(None)
 
+        self._manual_update_thread = _ManuelKontrol()
+        self._manual_update_thread.sonuc.connect(self._on_manual_check_done)
+        self._manual_update_thread.start()
+
+    def _on_manual_check_done(self, bilgi):
+        """Elle denetim sonucu."""
+        from app_updater import SURUM
+        if hasattr(self, 'update_check_btn'):
+            self.update_check_btn.setEnabled(True)
+        if not bilgi:
+            if hasattr(self, 'update_status_lbl'):
+                self.update_status_lbl.setText("❌ Sunucuya ulaşılamadı")
+            return
+        if daha_yeni_mi(bilgi.get("surum")):
+            if hasattr(self, 'update_status_lbl'):
+                self.update_status_lbl.setText(f"🚀 Yeni sürüm: v{bilgi.get('surum')}")
+            self._on_update_found(bilgi)
+        else:
+            if hasattr(self, 'update_status_lbl'):
+                self.update_status_lbl.setText(f"✅ Güncel (v{SURUM()})")
 
     def start_download(self, game_id, url, is_new):
         if not url:
@@ -7225,478 +6633,6 @@ del "%~f0"
         else:
             QMessageBox.critical(self, "Hata", msg)
     
-    def start_app_update(self, app_data):
-        """Uygulama güncellemesini başlat"""
-        # Onay iste
-        msg_text = (f"MEMOFAST {app_data.get('version')} sürümüne güncellenecek.\n\n"
-                    f"Güncelleme boyutu: {format_file_size(app_data.get('file_size_mb', 0))}\n\n"
-                    "Güncelleme tamamlandığında uygulama yeniden başlatılacak.\n"
-                    "Devam etmek istiyor musunuz?")
-        
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Uygulama Güncellemesi")
-        msg_box.setIcon(QMessageBox.Question)
-        msg_box.setText(msg_text)
-        btn_evet = msg_box.addButton("Evet", QMessageBox.YesRole)
-        btn_hayir = msg_box.addButton("Hayır", QMessageBox.NoRole)
-        msg_box.setDefaultButton(btn_evet)
-        msg_box.exec_()
-        
-        if msg_box.clickedButton() == btn_hayir:
-            return
-            
-        # Versiyon bilgisini sakla (başarılı olursa kaydedeceğiz)
-        self.pending_version = app_data.get('version', '0.0')
-        
-        # İndirme başlat
-        download_url = app_data.get('download_url', '')
-        if not download_url:
-            QMessageBox.warning(self, "Hata", "İndirme linki bulunamadı!")
-            return
-        
-        # Progress dialog
-        self.app_update_pd = QProgressDialog("Uygulama güncellemesi indiriliyor...", "İptal", 0, 100, self)
-        self.app_update_pd.setWindowModality(Qt.WindowModal)
-        self.app_update_pd.setWindowTitle("Güncelleme İndiriliyor")
-        self.app_update_pd.show()
-        
-        # AppUpdater oluştur
-        current_ver = self.settings.get("version", Config.VERSION)
-        self.app_updater = AppUpdater(current_ver, Config.UPDATE_URL, BASE_PATH)
-        
-        # Thread'de indir
-        class AppUpdateThread(QThread):
-            progress = pyqtSignal(int)
-            finished = pyqtSignal(bool, str, object)  # success, message, zip_path
-            
-            def __init__(self, updater, url, expected_hash=None):
-                super().__init__()
-                self.updater = updater
-                self.url = url
-                self.expected_hash = expected_hash
-
-            def run(self):
-                try:
-                    zip_path = self.updater.download_update(self.url, self.progress.emit, expected_hash=self.expected_hash)
-                    if zip_path:
-                        self.finished.emit(True, "İndirme tamamlandı!", zip_path)
-                    else:
-                        self.finished.emit(False, "İndirme başarısız!", None)
-                except Exception as e:
-                    self.finished.emit(False, str(e), None)
-        
-        self.app_update_thread = AppUpdateThread(self.app_updater, download_url, expected_hash=app_data.get('sha256'))
-        self.app_update_thread.progress.connect(self.app_update_pd.setValue)
-        self.app_update_thread.finished.connect(self.on_app_update_downloaded)
-        self.app_update_thread.start()
-    
-    def on_app_update_downloaded(self, success, message, zip_path):
-        """Uygulama güncellemesi indirildiğinde"""
-        if hasattr(self, 'app_update_pd'):
-            self.app_update_pd.close()
-        
-        if not success:
-            QMessageBox.critical(self, "İndirme Hatası", f"Güncelleme indirilemedi:\n{message}")
-            return
-        
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Güncelleme Hazır")
-        msg_box.setIcon(QMessageBox.Question)
-        msg_box.setText("Güncelleme başarıyla indirildi!\n\nŞimdi güncelleme uygulanacak ve program yeniden başlatılacak.\nDevam edilsin mi?")
-        btn_evet = msg_box.addButton("Evet", QMessageBox.YesRole)
-        btn_hayir = msg_box.addButton("Hayır", QMessageBox.NoRole)
-        msg_box.setDefaultButton(btn_evet)
-        msg_box.exec_()
-        
-        if msg_box.clickedButton() == btn_hayir:
-            return
-        
-        # Güncellemeyi uygula
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        
-        try:
-            success = self.app_updater.apply_update(zip_path)
-            QApplication.restoreOverrideCursor()
-            
-            if success:
-                # QMessageBox.information(
-                #     self,
-                #     "Güncelleme Başarılı",
-                #     "Güncelleme başarıyla uygulandı!\n\n"
-                #     "Uygulama şimdi yeniden başlatılacak."
-                # )
-                
-                # Yeni versiyonu kaydet
-                try:
-                    # Thread içinde self.pending_update_version saklamayı unutmuşuz
-                    # Ancak app_updater nesnesinden veya thread'den çekebiliriz
-                    # Thread'e url verdik, versiyonu vermedik.
-                    # En kolayı: apply_update başarılıysa, indirdiğimiz paketin versiyonunu varsayalım
-                    # Ancak burada paketten versiyonu okuma şansımız yok (zip silindi)
-                    # Çözüm: start_app_update'de self.pending_version saklayalım
-                    if hasattr(self, 'pending_version'):
-                        self.settings["version"] = self.pending_version
-                        self.save_settings()
-                except Exception as e:
-                    print(f"Versiyon güncellenemedi: {e}")
-                
-                # Yeniden başlat
-                self.app_updater.restart_application()
-            else:
-                QMessageBox.critical(
-                    self,
-                    "Güncelleme Hatası",
-                    "Güncelleme uygulanırken hata oluştu!\n"
-                    "Eski sürüm geri yüklendi."
-                )
-        except Exception as e:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "Hata", f"Güncelleme sırasında hata:\n{str(e)}")
-
-
-    def manual_select_patch_target_game(self):
-        """Yama yükleyici için manuel oyun klasörü seç"""
-        folder_path = QFileDialog.getExistingDirectory(self, "Oyun Klasörünü Seçin (Örn: C:/Games/MyGame)", "")
-        if folder_path:
-            # Yapay bir oyun objesi oluştur
-            folder_name = os.path.basename(folder_path)
-            fake_game_data = {
-                'name': f"[Manuel] {folder_name}",
-                'path': folder_path,
-                'exe': os.path.join(folder_path, f"{folder_name}.exe"), # Tahmini, önemli değil path kullanılıyor
-                'platform': 'manual'
-            }
-            
-            # Combobox'a ekle ve seç
-            self.yama_target_game_combo.addItem(f"📁 [Manuel] {folder_name}", fake_game_data)
-            self.yama_target_game_combo.setCurrentIndex(self.yama_target_game_combo.count() - 1)
-            
-            QMessageBox.information(self, "Seçildi", f"'{folder_name}' klasörü hedef oyun olarak seçildi.")
-
-    def handle_patch_install(self):
-        """Yama İndir ve Kur Mantığı (Refactored v2)"""
-
-
-        selected_file_data = self.yama_file_combo.currentData()
-        selected_game_data = self.yama_target_game_combo.currentData()
-        
-        if not selected_file_data or not selected_game_data:
-            QMessageBox.warning(self, "Uyarı", "Lütfen hem yama dosyasını hem de hedef oyunu seçin.")
-            return
-
-        # 1. ONAY AL
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("MemoFast")
-        msg_box.setIcon(QMessageBox.Question)
-        msg_box.setText(f"MemoFast '{selected_game_data.get('name')}' oyununu Türkçe yapacak, yapsın mı?")
-        btn_evet = msg_box.addButton("Evet", QMessageBox.YesRole)
-        btn_hayir = msg_box.addButton("Hayır", QMessageBox.NoRole)
-        msg_box.setDefaultButton(btn_evet)
-        msg_box.exec_()
-        
-        if msg_box.clickedButton() == btn_hayir: return
-
-        # 2. HAZIRLIK
-        progress = QProgressDialog("İşlem Başlatılıyor...", "İptal", 0, 100, self)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.show()
-
-        try:
-            # Logu temizle
-            self.yama_install_log.clear()
-            self.yama_install_log.addItem(f"{'='*50}")
-            self.yama_install_log.addItem(f"🎯 YAMA KURULUMU BAŞLATILDI (v2.0)")
-            
-            # --- PATH TESPİTİ (CRITICAL PATH) ---
-            # Oyunun kök klasörünü belirle. Manuel ise direkt 'path', değilse 'exe'nin parentı.
-            if selected_game_data.get('platform') == 'manual':
-                game_root = Path(selected_game_data.get('path'))
-            else:
-                raw_path = selected_game_data.get('exe') or selected_game_data.get('path')
-                game_root = Path(raw_path).parent if os.path.isfile(raw_path) else Path(raw_path)
-
-            self.yama_install_log.addItem(f"📂 Hedef Oyun Klasörü: {game_root}")
-            
-            # Dosya Hazırlığı
-            file_target_path = selected_file_data.get('target_path', '')
-            filename = os.path.basename(file_target_path)
-            
-            # İndirme Kontrolü
-            download_success = True
-            if selected_file_data.get('url'):
-                progress.setLabelText("Dosya indiriliyor...")
-                state = self.get_update_state()
-                curr_ver = self.settings.get("version", Config.VERSION)
-                updater = AppUpdater(curr_ver, Config.UPDATE_URL, BASE_PATH, installed_yamas=state.get("installed", []))
-                
-                # NewYama altına yönlendir
-                file_to_download = selected_file_data.copy()
-                if not file_target_path.startswith("NewYama"):
-                    file_to_download['target_path'] = f"NewYama/{filename}"
-                
-                download_success = updater.download_and_install_files(
-                    [file_to_download], 
-                    progress_callback=lambda p, m: (progress.setValue(p//2), QApplication.processEvents()),
-                    cancel_check=progress.wasCanceled,
-                    extract_zips=False
-                )
-                source_path = BASE_PATH / file_to_download['target_path']
-            else:
-                # Yerel dosya (Fallback)
-                source_path = BASE_PATH / "NewYama" / filename
-                if not source_path.exists():
-                     source_path = BASE_PATH / file_target_path
-
-            if not download_success or not source_path.exists():
-                raise Exception("Dosya indirilemedi veya bulunamadı.")
-            
-            self.yama_install_log.addItem(f"📦 Kaynak Dosya: {filename}")
-            QApplication.processEvents()
-
-            # --- AKILLI ARAMA VE HEDEF BELİRLEME (THE BRAIN) ---
-            progress.setLabelText("Hedef klasör analiz ediliyor...")
-            progress.setValue(50)
-            
-            found_target_path = game_root # Varsayılan: Oyunun ana klasörü
-            is_zip = filename.lower().endswith('.zip')
-            
-            if is_zip:
-                # 1. ZIP İÇERİK ANALİZİ
-                import zipfile
-                zip_roots = []
-                try:
-                    with zipfile.ZipFile(str(source_path), 'r') as zf:
-                        for n in zf.namelist():
-                            if '/' in n or '\\' in n:
-                                r = n.split('/')[0].split('\\')[0]
-                                if r and r not in zip_roots: zip_roots.append(r.lower())
-                except: pass
-                
-                self.yama_install_log.addItem(f"🔍 Zip İçeriği: {zip_roots}")
-                
-                # 2. HEDEF TARAMA (Deep Search)
-                target_name = Path(filename).stem.lower() # AOC.zip -> aoc
-                search_candidates = set([target_name] + zip_roots + ["data", "content", "game"])
-                
-                best_match = None
-                
-                for root, dirs, files in os.walk(str(game_root)):
-                    # Çok derine inme
-                    if root[len(str(game_root)):].count(os.sep) > 5: continue
-                    
-                    for d in dirs:
-                        d_lower = d.lower()
-                        
-                        # A. KESİN EŞLEŞME (Game/AOC == AOC.zip) -> EN YÜKSEK ÖNCELİK
-                        if d_lower == target_name:
-                            best_match = Path(root) / d
-                            self.yama_install_log.addItem(f"✅ KESİN EŞLEŞME BULUNDU: {d}")
-                            # Direkt bu klasörün içine çıkarmak istiyoruz, ANCAK...
-                            # Eğer zip içinde de AOC klasörü varsa -> Parent'a çıkar (Merge)
-                            # Eğer zip içinde AOC yoksa -> Bu klasörün içine çıkar
-                            if target_name in zip_roots:
-                                found_target_path = best_match.parent
-                                self.yama_install_log.addItem(f"➡️ Zip yapısı uyumlu, üst klasöre çıkarılacak (Merge)")
-                            else:
-                                found_target_path = best_match
-                                self.yama_install_log.addItem(f"➡️ Direkt klasör içine çıkarılacak")
-                            break
-                        
-                        # B. İÇERİK EŞLEŞMESİ (Game/Data == Zip/Data)
-                        elif d_lower in zip_roots:
-                            # Sadece kesin eşleşme yoksa bunu değerlendir (Opsiyonel)
-                            # Şimdilik sadece loglayalım, önceliği isim eşleşmesine veriyoruz.
-                             pass
-                    
-                    if best_match: break
-                
-                if not best_match:
-                    self.yama_install_log.addItem(f"⚠️ Özel klasör eşleşmesi bulunamadı.")
-                    self.yama_install_log.addItem(f"📂 Ana oyun klasörüne çıkarılacak (Root Fallback)")
-                
-            else:
-                # Normal dosya ise (exe, dll) direkt root'a at (veya özel arama eklenebilir)
-                found_target_path = game_root
-
-            # --- İŞLEM (EXECUTION) ---
-            progress.setLabelText("Dosyalar yükleniyor...")
-            progress.setValue(70)
-            self.yama_install_log.addItem(f"🚀 Çıkartma Başlıyor -> {found_target_path}")
-            QApplication.processEvents()
-            
-            import shutil
-            
-            # =========================================================
-            # YÖNETİCİ İZNİ (UAC) İLE ÇIKARTMA İŞLEMİ (ELEVATED PROCESS)
-            # =========================================================
-            import tempfile
-            import sys
-            import ctypes
-            import shutil
-            
-            # Arka planda calisacak, yonetici yetkisine sahip ufak bir python betigi olusturuyoruz
-            script_path = os.path.join(tempfile.gettempdir(), "memofast_admin_extractor.py")
-            with open(script_path, "w", encoding="utf-8") as sf:
-                sf.write("import zipfile\n")
-                sf.write("import shutil\n")
-                sf.write("import os\n")
-                sf.write("from pathlib import Path\n")
-                sf.write(f"is_zip = {is_zip}\n")
-                sf.write(f"source = r'{str(source_path)}'\n")
-                sf.write(f"target = r'{str(found_target_path)}'\n")
-                sf.write("try:\n")
-                sf.write("    if is_zip:\n")
-                sf.write("        with zipfile.ZipFile(source, 'r') as zf:\n")
-                sf.write("            for member in zf.infolist():\n")
-                sf.write("                target_file = Path(target) / member.filename\n")
-                sf.write("                if not member.is_dir() and target_file.exists():\n")
-                sf.write("                    try: target_file.unlink()\n")
-                sf.write("                    except: pass\n")
-                sf.write("                zf.extract(member, target)\n")
-                sf.write("    else:\n")
-                sf.write("        shutil.copy2(source, target)\n")
-                sf.write("except Exception as e:\n")
-                sf.write("    with open(r'C:\\temp\\memofast_extract_error.txt', 'w') as err_f:\n")
-                sf.write("        err_f.write(str(e))\n")
-            
-            self.yama_install_log.addItem(f"🛡️ Yönetici onayı bekleniyor...")
-            QApplication.processEvents()
-            
-            # Bu kod Windows UAC (Yönetici) popup'ı çıkarır
-            # Kullanıcı "Evet" derse arka planda scripti yönetici olarak çalıştırır
-            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{script_path}"', None, 0)
-            
-            if ret <= 32:
-                raise Exception("Yönetici izni reddedildi veya başlatılamadı.")
-                
-            self.yama_install_log.addItem(f"✅ Dosyalar yönetici izniyle hedefe aktarıldı.")
-
-            # Bitti
-            self.yama_install_log.addItem(f"✅ İŞLEM BAŞARIYLA TAMAMLANDI")
-            
-            progress.setValue(100)
-            progress.close()
-            
-            # Başarı mesajı yerine WWM kontrolü
-            yama_adi = self.yama_file_combo.currentText()
-            
-            if "Where Winds Meet" in yama_adi or "WWM" in yama_adi:
-                try:
-                    # BAT Dosyası (Gelişmiş, Şifreli, Animasyonlu)
-                    bat_content = r"""@echo off
-title WWM - TR Loader
-color 0A
-
-:: --- SIFRELEME VE DEGISKENLER ---
-set "A1=L"
-set "A2=ago"
-set "B1=Fa"
-set "B2=st"
-set "EX=.exe"
-set "HEDEF=%A1%%A2%%B1%%B2%%EX%"
-
-set "L1=https://www.you"
-set "L2=tube.com/"
-set "L3=@Mehmet"
-set "L4=ariTv"
-set "LINK=%L1%%L2%%L3%%L4%"
-
-set "TEMP_DIR=%TEMP%\WWM_TR_Temp"
-if not exist "%TEMP_DIR%" mkdir "%TEMP_DIR%"
-
-:: --- TEMIZLIK ---
-taskkill /F /IM %HEDEF% >nul 2>&1
-
-:: --- DOSYA KOPYALAMA ---
-copy /y "C:\Windows\System32\cmd.exe" "%TEMP_DIR%\%HEDEF%" >nul
-
-:: --- SERVIS BASLATMA (GIZLI) ---
-start "WWM_SERVICE_BG" /min "%TEMP_DIR%\%HEDEF%" /c "title WWM_SERVICE_BG & echo Servis Aktif... & pause"
-
-:: --- TARAYICI ACMA (Kanal Linki) ---
-start "" "%LINK%"
-
-:: --- ANIMASYON (Yin Yang Efekti) ---
-cls
-echo.
-echo      [..] YUKLENIYOR...
-timeout /t 1 >nul
-cls
-echo.
-echo      [::] SERVIS HAZIRLANIYOR...
-timeout /t 1 >nul
-
-:: --- ANA EKRAN ---
-cls
-color 0B
-echo.
-echo ==================================================
-echo        MEMOFAST - WHERE WINDS MEET LOADER
-echo ==================================================
-echo.
-echo                ,^.
-echo              ,'   `.
-echo             /       \   ENJEKSIYON SERVISI
-echo            |    O    |       AKTIF!
-echo            |         |
-echo             \       /
-echo              `. _ ,'
-echo.
-echo ==================================================
-echo.
-echo   [1] Servis su an arka planda calisiyor.
-echo   [2] Kanaliniz tarayicida acildi.
-echo   [3] Lutfen oyunu simdi baslatin ve oynayin.
-echo.
-echo ==================================================
-echo   OYUN BITTIKTEN SONRA BURAYA GELIP BIR TUSA BASIN
-echo         (Temizlik yapilip kapatilacak)
-echo ==================================================
-pause
-
-:: --- KAPANIŞ VE TEMIZLIK ---
-taskkill /F /IM %HEDEF% /FI "WINDOWTITLE eq WWM_SERVICE_BG*" >nul 2>&1
-taskkill /F /IM %HEDEF% >nul 2>&1
-rmdir /s /q "%TEMP_DIR%"
-exit
-"""
-                    # BAT dosyasını OYUN/YAMA KLASÖRÜNE oluştur ve çalıştır
-                    import tempfile
-                    target_folder = Path(found_target_path)
-                    
-                    # Eğer klasör adı 'Where Winds Meet' değilse ve içinde varsa oraya gir (Garanti olsun)
-                    if (target_folder / "Where Winds Meet").exists() and (target_folder / "Where Winds Meet").is_dir():
-                        target_folder = target_folder / "Where Winds Meet"
-
-                    bat_path = target_folder / "WWM_TR_LOADER.bat"
-                    
-                    with open(bat_path, "w", encoding="cp1254") as f:
-                        f.write(bat_content)
-                    
-                    os.startfile(str(bat_path))
-                    logger.debug("WWM BAT Loader oyun klasörüne kaydedildi ve çalıştırıldı: %s", bat_path)
-
-                except Exception as e:
-                    logger.error("WWM Loader hatası: %s", e)
-                    QMessageBox.critical(self, "Hata", f"Loader başlatılamadı:\n{e}")
-            else:
-                QMessageBox.information(self, "Başarılı", "Yama başarıyla kuruldu!\nİyi oyunlar dileriz.")
-            
-            # Durum Güncelle
-            state = self.get_update_state()
-            version_text = self.update_status_lbl.text().replace("🎮 Yeni Yama Mevcut: ", "")
-            if version_text not in state["installed"]:
-                state["installed"].append(version_text)
-                self.save_update_state(state)
-            self.update_status_lbl.setText("✅ İşlem Tamamlandı")
-
-        except Exception as e:
-            progress.close()
-            # Eğer bir hata olduysa ve progress açıksa kapat
-            self.yama_install_log.addItem(f"❌ HATA: {str(e)}")
-            QMessageBox.critical(self, "Hata", f"İşlem sırasında hata oluştu:\n{e}")
-
-
     def create_settings_page(self):
         # Kaydırılabilir alan (ScrollArea) ekleyerek küçük ekranlarda sığmama sorununu çözelim
         scroll = QScrollArea()
@@ -10945,8 +9881,12 @@ exit
             
             def on_finished(success, msg):
                 if hasattr(self, 'install_btn'): self.install_btn.setEnabled(True)
-                if hasattr(self, 'trans_log_list'): 
-                    self.trans_log_list.addItem(f"✅ Çeviri sonucu: {msg}")
+                # Uzun hata gövdeleri (ör. tüm JSON dosyası) arayüzü kilitlediği için kısaltılır
+                short_msg = " ".join(str(msg).split())
+                if len(short_msg) > 200:
+                    short_msg = short_msg[:200] + "..."
+                if hasattr(self, 'trans_log_list'):
+                    self.trans_log_list.addItem(f"✅ Çeviri sonucu: {short_msg}")
                     self.trans_log_list.scrollToBottom()
                 if success:
                     def show_mandatory_feedback():
@@ -10955,7 +9895,9 @@ exit
                         self.show_community_feedback_dialog(game_name, "Unity")
                     QTimer.singleShot(1000, show_mandatory_feedback)
                 else:
-                    QMessageBox.critical(self, "Hata", f"Çeviri sırasında hata oluştu:\n{msg}")
+                    QMessageBox.critical(self, "Hata",
+                                         "Çeviri tamamlanamadı, dosya değiştirilmedi.\n"
+                                         f"Sebep: {short_msg}")
                     
             worker.finished.connect(on_finished)
             self.unity_trans_worker = worker

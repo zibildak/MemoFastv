@@ -16,12 +16,23 @@ from random import uniform
 from logger import setup_logger
 
 logger = setup_logger(__name__)
+# [FIX] GoogleTranslator'ı DeepL'den AYRI import et. Aksi halde deep_translator
+# >=1.9'da 'DeepL' sınıfı 'DeeplTranslator' olarak yeniden adlandırıldığı için
+# tek try içindeki 'from deep_translator import DeepL' ImportError verir ve
+# except bloğu GoogleTranslator'ı da None yapardı → tüm çeviriler ölü yedek
+# endpoint'e (429) düşüp boş dönerdi (oyun çevrilmiyor bug'ı).
 try:
     from deep_translator import GoogleTranslator
-    from deep_translator import DeepL
 except ImportError:
     GoogleTranslator = None
-    DeepL = None
+
+try:
+    from deep_translator import DeepL
+except ImportError:
+    try:
+        from deep_translator import DeeplTranslator as DeepL  # yeni sürüm ismi
+    except ImportError:
+        DeepL = None
 
 try:
     import tkinter as tk

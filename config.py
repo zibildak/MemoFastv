@@ -102,8 +102,10 @@ class Config:
     AI_MODELS_PATH = BASE_PATH / "gemma" / "models"
     DEFAULT_AI_MODEL = "Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 
-    # Güncelleme URL (Google Drive JSON)
-    UPDATE_URL = "https://drive.google.com/file/d/1gF4XEFQ0s-19myUsEYwWoz0iuVR7Jd0t/view?usp=sharing"
+    # Otomatik güncelleme adresi (GitHub Pages -> surum.json).
+    # Güncelleme mantığı app_updater.py içindedir; sürüm bu dosyanın
+    # VERSION sabitinden okunur ve yayinla.py tarafından güncellenir.
+    UPDATE_URL = "https://zibildak.github.io/MemoFastv/surum.json"
 
     # [TOPLULUK] Çeviri havuzu (GitHub üzerinden, kullanıcıya şeffaf).
     # index.json'a paket eklemek için: community_ceviriler/README.md'ye bakın.
@@ -113,7 +115,7 @@ class Config:
                                 "?title=%5B%C3%87eviri%20Paketi%5D%20Oyun%20Ad%C4%B1"
                                 "&body=Oyun%3A%20...%0AKaynak%20dil%3A%20en%0AHedef%20dil%3A%20tr%0A%0A"
                                 "Paket%20dosyas%C4%B1n%C4%B1%20buraya%20s%C3%BCr%C3%BCkleyin.")
-    VERSION = "1.1.2" # Mevcut versiyonu burada tutalım
+    VERSION = "1.1.5" # Mevcut versiyonu burada tutalım
     THEME_COLOR = "#00aaff" # Varsayılan tema rengi
 
     @staticmethod
