@@ -8,6 +8,8 @@ import concurrent.futures
 from config import Constants
 
 # Bağımlılıklar
+from translate_retry import ResilientTranslator
+
 try:
     from deep_translator import GoogleTranslator
 except ImportError:
@@ -278,6 +280,10 @@ class RPGMakerManager:
         # Çeviri İşlemi
         if GoogleTranslator:
             translator = GoogleTranslator(source='auto', target=target_lang)
+            # [FIX] Thread-safe + retry'li sarmalayici (bkz. translate_retry.py).
+            # Eskiden tek nesne MAX_WORKERS thread'e paylastiriliyor ve tek deneme
+            # yapiliyordu; gecici hatalar metni kalici olarak cevrilmemis birakiyordu.
+            rt = ResilientTranslator(translator, source_lang='auto', target_lang=target_lang)
             translations = {}
             text_list = []
             cache_hits = 0
@@ -299,9 +305,7 @@ class RPGMakerManager:
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=RPGMakerManager.MAX_WORKERS) as executor:
                 def translate_single(text):
-                    try:
-                        return text, translator.translate(text)
-                    except: return text, None
+                    return text, rt.translate(text)
 
                 future_to_text = {executor.submit(translate_single, t): t for t in text_list}
                 for future in concurrent.futures.as_completed(future_to_text):
@@ -313,6 +317,11 @@ class RPGMakerManager:
                     completed += 1
                     if progress_callback and (completed % 50 == 0 or completed == total):
                         progress_callback(f"⚡ Çeviri: {completed}/{total}")
+
+            # [YENİ] Dürüst rapor — kaç metnin çevrilemediğini artık söylüyoruz.
+            rapor = rt.report(total)
+            if rapor and progress_callback:
+                progress_callback(rapor)
 
             if persist_cache:
                 try: persist_cache.save()

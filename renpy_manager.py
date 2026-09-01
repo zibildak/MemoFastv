@@ -11,6 +11,7 @@ import re
 import concurrent.futures
 import ssl
 from config import Constants, Config
+from translate_retry import ResilientTranslator
 
 try:
     from deep_translator import GoogleTranslator
@@ -119,17 +120,22 @@ class RenPyManager:
             if cached:
                 return cached
 
+        # [FIX] translator_obj artik ResilientTranslator sarmalayicisi:
+        # her thread kendi cevirmen ornegini kullanir ve gecici hatalar
+        # ustel backoff ile yeniden denenir (bkz. translate_retry.py).
+        # Eskiden tek nesne paylasiliyor, tek deneme yapiliyor ve hata halinde
+        # ORIJINAL metin donduruluyordu -> satir sessizce Ingilizce kaliyordu.
         result = text
         try:
             if service == "deepl":
                 res = translator_obj.translate_text(text, target_lang="TR")
                 result = res.text
-            elif service == "gemini":
+            else:
                 res = translator_obj.translate(text)
-                result = res if res else text
-            elif service == "google":
-                result = translator_obj.translate(text)
-        except:
+                if not res:
+                    return text  # cevrilemedi; orijinali koru ama sayaca islendi
+                result = res
+        except Exception:
             return text
 
         if persist_cache and result and result != text:
@@ -250,6 +256,10 @@ class RenPyManager:
         if progress_callback: progress_callback(f"🌐 {len(rpy_files)} RPY kaynak dosyasında çeviri işlemi başlatılıyor...")
         
         translator_obj = RenPyManager._get_translator(service, api_key, target_lang)
+        if service != "deepl" and translator_obj is not None:
+            translator_obj = ResilientTranslator(
+                translator_obj, source_lang="auto", target_lang=target_lang
+            )
         if not translator_obj:
             return False, f"Çeviri servisi başlatılamadı ({service}). Lütfen API Anahtarınızı kontrol edin."
 
@@ -329,6 +339,11 @@ class RenPyManager:
                 persist_cache.save()
             except Exception:
                 pass
+
+        # [YENİ] Dürüst rapor — kaç satırın çevrilemediğini artık söylüyoruz.
+        if isinstance(translator_obj, ResilientTranslator):
+            rapor = translator_obj.report()
+            if rapor and progress_callback: progress_callback(rapor)
 
         if progress_callback: progress_callback("✅ Çeviri başarıyla tamamlandı!")
         if progress_callback: progress_callback("ℹ️ BİLGİ: Oyunu başlattığınızda Ren'Py ilk açılışta çevrilmiş dosyaları derleyecektir, bu yüzden açılış biraz uzun sürebilir.")

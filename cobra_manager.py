@@ -34,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from random import uniform
 from config import Config
 from logger import setup_logger
+from translate_retry import ResilientTranslator
 
 logger = setup_logger(__name__)
 
@@ -398,6 +399,11 @@ class CobraManager:
         if progress_callback:
             progress_callback(f"🚀 TURBO MOD: {total} satır {max_workers} işçi ile çevriliyor...")
 
+        # [FIX] Thread-safe + retry'li sarmalayici.
+        # Eskiden tek 'translator' nesnesi tum thread'lere paylastiriliyor ve tek deneme
+        # yapiliyordu; Google'in gecici throttle yaniti satiri kalici olarak bos birakiyordu.
+        rt = ResilientTranslator(translator, source_lang="auto", target_lang=target_lang)
+
         def translate_worker(idx, text):
             try:
                 if service == "google":
@@ -406,7 +412,7 @@ class CobraManager:
                 protected = protector.protect(text) if protector else text
                 result = None
                 if translator:
-                    result = translator.translate(protected)
+                    result = rt.translate(protected)
                 else:
                     try:
                         url = "https://translate.googleapis.com/translate_a/single"
@@ -433,8 +439,9 @@ class CobraManager:
                     r_idx, r_text = future.result()
                     if r_text and len(rows[r_idx]) > 2:
                         rows[r_idx][2] = r_text
-                except Exception:
-                    pass
+                except Exception as e_fut:
+                    # [FIX] Eskiden burada sessiz 'pass' vardi; hata sayilmiyordu.
+                    logger.warning(f"Future hatasi: {e_fut}")
                 completed += 1
                 if progress_bar_callback:
                     progress_bar_callback(completed)
@@ -442,6 +449,11 @@ class CobraManager:
                     pct = int((completed / total) * 100) if total else 100
                     if progress_callback:
                         progress_callback(f"⚡ Çevriliyor... ({completed}/{total}) - %{pct}")
+
+        # [YENİ] Dürüst rapor — sessiz başarısızlık yok.
+        rapor = rt.report(total)
+        if rapor and progress_callback:
+            progress_callback(rapor)
 
         # [YENİ] Yeni çevirileri kalıcı önbelleğe yaz
         if persist_cache:

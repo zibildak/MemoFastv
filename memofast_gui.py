@@ -8955,8 +8955,14 @@ class MainWindow(QMainWindow):
         
         self.speed_slider = QSlider(Qt.Horizontal)
         self.speed_slider.setMinimum(1)
-        self.speed_slider.setMaximum(30)
-        self.speed_slider.setValue(10) # Varsayılan: Turbo (10)
+        # [FIX] Üst sınır 30 -> 10.
+        # Ölçüm: her işçi ~0.8 sn'de 1 istek atıyor. 30 işçi = ~37 istek/sn; Google
+        # bu hızda "soft block" yanıtı (TranslationNotFound) dönüyor ve satırlar sessizce boş kalıyordu.
+        # 60 saat sorunsuz çalışan referans araç 4 işçi x 25'lik paket = ~7 istek/sn ile çalışıyor.
+        # Ölçümde 6 işçi (6.4 ist/sn) ve 10 işçi (11.4 ist/sn) retry ile 0 kalıcı hata verdi;
+        # 14 işçiden sonra throttle devreye giriyor. Bu yüzden tavan 10.
+        self.speed_slider.setMaximum(10)
+        self.speed_slider.setValue(6) # Varsayılan: kanıtlanmış güvenli hız (~7 istek/sn)
         self.speed_slider.setFixedSize(170, 20)
         self.speed_slider.setCursor(Qt.PointingHandCursor)
         self.speed_slider.setStyleSheet("""
@@ -8971,7 +8977,7 @@ class MainWindow(QMainWindow):
         self.speed_val_lbl.setAlignment(Qt.AlignCenter)
         self.speed_val_lbl.setStyleSheet("background-color: #6c8eff; color: #ffffff; font-weight: 700; border-radius: 9px; padding: 2px 6px;")
         
-        self.speed_warning_lbl = QLabel("Yüksek Ban Riski!")
+        self.speed_warning_lbl = QLabel("Hız arttıkça Google throttle riski artar")
         self.speed_warning_lbl.setStyleSheet("color: #ff7a67; font-weight: 700; font-size: 11px;")
         self.speed_warning_lbl.setVisible(False)
         
@@ -8979,7 +8985,7 @@ class MainWindow(QMainWindow):
             self.speed_val_lbl.setText(str(val))
             
             # Uyarı kontrolü
-            if val >= 20:
+            if val >= 7:
                 self.speed_warning_lbl.setVisible(True)
                 self.speed_val_lbl.setStyleSheet("background-color: #8b2a2a; color: #fff1f1; font-weight: 700; border-radius: 9px; padding: 2px 6px;")
             else:
@@ -8992,8 +8998,14 @@ class MainWindow(QMainWindow):
         self.speed_slider.valueChanged.connect(on_speed_change)
         
         # Önceden kayıtlı ayar varsa yükle
-        saved_speed = self.settings.get("translation_speed", 10)
+        # [FIX] Eski ayarlarda 30'a kadar değer kayıtlı olabilir; yeni tavana kırp.
+        saved_speed = self.settings.get("translation_speed", 6)
+        try:
+            saved_speed = max(1, min(10, int(saved_speed)))
+        except (TypeError, ValueError):
+            saved_speed = 6
         self.speed_slider.setValue(saved_speed)
+        on_speed_change(saved_speed)  # kırpılan değeri ayarlara da yaz
         
         speed_layout.addWidget(speed_lbl)
         speed_layout.addWidget(self.speed_slider)

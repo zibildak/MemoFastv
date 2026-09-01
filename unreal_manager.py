@@ -11,11 +11,13 @@ import textwrap
 import requests
 from pathlib import Path
 from config import Config
+from translate_retry import ResilientTranslator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from random import uniform
 from logger import setup_logger
 
 logger = setup_logger(__name__)
+
 # [FIX] GoogleTranslator'ı DeepL'den AYRI import et. Aksi halde deep_translator
 # >=1.9'da 'DeepL' sınıfı 'DeeplTranslator' olarak yeniden adlandırıldığı için
 # tek try içindeki 'from deep_translator import DeepL' ImportError verir ve
@@ -545,6 +547,11 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
 
         work_items.append((i, source_text))
 
+    # [FIX] Thread-safe + retry'li sarmalayıcı (ortak katman: translate_retry.py).
+    # deep_translator'ın GoogleTranslator'ı thread-safe değil ve Google'ın geçici
+    # throttle yanıtı retry olmadan satırı kalıcı boş bırakıyordu.
+    rt = ResilientTranslator(translator, source_lang=source_lang, target_lang=target_lang)
+
     def translate_worker(idx, text):
         try:
             if service == "google": time.sleep(uniform(0.1, 0.4))
@@ -562,11 +569,7 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
                 # Yerel AI ve Gemini 'target_lang' parametresini çalışma anında kabul eder.
                 # GoogleTranslator ve DeepL ise başlatılırken (init) dili alır.
                 
-                class_name = translator.__class__.__name__
-                if class_name in ["LocalAIEngine", "GeminiTranslator"]:
-                    res_text = translator.translate(protected_text, target_lang=target_lang)
-                else:
-                    res_text = translator.translate(protected_text)
+                res_text = rt.translate(protected_text)
             else:
                 try:
                     url = "https://translate.googleapis.com/translate_a/single"
@@ -658,6 +661,9 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
                     for idx, result_text in future.result():
                         if result_text and len(rows[idx]) > 2:
                             rows[idx][2] = result_text
+                            success_count += 1
+                        else:
+                            failure_count += 1
                         completed_count += 1
                         if progress_bar_callback:
                             progress_bar_callback(completed_count)
@@ -672,13 +678,21 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
             future_to_idx = {executor.submit(translate_worker, idx, txt): idx for (idx, txt) in work_items}
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
+                # [FIX] Eskiden burada 'except: pass' vardı ve completed_count yine artıyordu:
+                # çevrilemeyen satırlar sessizce boş kalırken ilerleme çubuğu %100 gösteriyordu.
+                # Artık başarısızlıklar sayılıyor ve sonda kullanıcıya bildiriliyor.
                 try:
                     result_idx, result_text = future.result()
                     if result_text:
                         # rows[result_idx][1] = result_text # Source DEĞİŞTİRİLMİYOR
                         if len(rows[result_idx]) > 2:
                             rows[result_idx][2] = result_text # Target Dolduruluyor
-                except: pass
+                        success_count += 1
+                    else:
+                        failure_count += 1
+                except Exception as e_fut:
+                    failure_count += 1
+                    print(f"Future hatasi (satir {idx}): {e_fut}")
 
                 completed_count += 1
                 if progress_bar_callback:
@@ -697,6 +711,20 @@ def process_locres_file(locres_file, progress_callback=None, is_pak_temp=False, 
                             short_txt = result_text[:50] + "..." if len(result_text) > 50 else result_text
                             msg = f"🤖 [Satır {completed_count}/{total_items}] Çeviri: {short_txt}"
                         progress_callback(msg)
+
+    # [YENİ] Çeviri sonucu raporu — sessiz başarısızlık artık yok.
+    if failure_count:
+        oran = (failure_count / total_items * 100) if total_items else 0
+        uyari = (f"⚠️ {failure_count} satır çevrilemedi (%{oran:.1f}). "
+                 f"Bu satırlar İngilizce kalacak. Hız ayarını düşürüp tekrar çalıştırırsanız "
+                 f"resume sistemi sadece eksikleri dener.")
+        print(uyari)
+        logger.warning(f"Cevrilemedi: {failure_count}/{total_items} satir (hiz={max_workers})")
+        if progress_callback: progress_callback(uyari)
+    elif total_items:
+        if progress_callback: progress_callback(f"✅ {total_items} satırın tamamı çevrildi (hata yok).")
+    if rt.retry_rescued and progress_callback:
+        progress_callback(f"♻️ {rt.retry_rescued} satır yeniden deneme sayesinde kurtarıldı.")
 
     # [YENİ] Yeni çevirileri kalıcı önbelleğe yaz (sonraki oyunlar için)
     if persist_cache:
