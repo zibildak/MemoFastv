@@ -164,17 +164,29 @@ def paketi_indir(bilgi, ilerleme=None):
 def _guvenli_isimler(zf):
     """ZIP icindeki girisleri denetler.
 
-    Sadece KOK SEVIYEDE .py dosyalarina izin verilir. Alt klasor, mutlak
-    yol veya '..' iceren giris varsa paket reddedilir (dizin disina yazma
-    saldirisina karsi).
+    Sadece .py dosyalarina izin verilir. ALT KLASOR ARTIK SERBEST
+    (gui/, gemma/, unity/ gibi paketler de guncellenebilsin diye), ama
+    dizin disina yazma saldirisina karsi su kurallar korunur:
+      - mutlak yol yasak
+      - '..' ile ust dizine cikma yasak
+      - ters bolu (Windows yolu) yasak
+      - surucu harfi (C:) yasak
+      - cozulmus yol hedef dizinin ICINDE kalmali
+
+    NOT: Eski surumler (<=1.1.7) '/' iceren her girdiyi reddediyordu.
+    Bu yuzden alt klasorlu paketler ancak bu surum kullanicilara
+    ulastiktan SONRA yayinlanabilir.
     """
     isimler = []
     for n in zf.namelist():
-        if n.endswith("/"):
+        if n.endswith("/"):          # klasor girdisi: gerek yok
+            continue
+        if "\\" in n or os.path.isabs(n) or ":" in n:
             return None
-        if "/" in n or "\\" in n or n.startswith(".."):
+        parcalar = n.split("/")
+        if any(p in ("", ".", "..") for p in parcalar):
             return None
-        if os.path.isabs(n) or not n.lower().endswith(".py"):
+        if not n.lower().endswith(".py"):
             return None
         isimler.append(n)
     return isimler or None
@@ -208,7 +220,7 @@ def paketi_uygula(zip_yolu, yeni_surum):
 
         # --- her dosya derlenebiliyor mu? ---
         for ad in isimler:
-            yol = os.path.join(gecici_dizin, ad)
+            yol = os.path.join(gecici_dizin, *ad.split("/"))
             try:
                 py_compile.compile(yol, doraise=True, cfile=yol + "c")
             except Exception as e:
@@ -220,21 +232,24 @@ def paketi_uygula(zip_yolu, yeni_surum):
         os.makedirs(yedek_dizin, exist_ok=True)
         yedeklenen = []
         for ad in isimler:
-            mevcut = os.path.join(hedef_dizin, ad)
+            mevcut = os.path.join(hedef_dizin, *ad.split("/"))
             if os.path.exists(mevcut):
-                shutil.copy2(mevcut, os.path.join(yedek_dizin, ad))
+                yedek_hedef = os.path.join(yedek_dizin, *ad.split("/"))
+                os.makedirs(os.path.dirname(yedek_hedef), exist_ok=True)
+                shutil.copy2(mevcut, yedek_hedef)
                 yedeklenen.append(ad)
 
         # --- kopyala; hata olursa geri al ---
         try:
             for ad in isimler:
-                shutil.copy2(os.path.join(gecici_dizin, ad),
-                             os.path.join(hedef_dizin, ad))
+                hedef = os.path.join(hedef_dizin, *ad.split("/"))
+                os.makedirs(os.path.dirname(hedef), exist_ok=True)
+                shutil.copy2(os.path.join(gecici_dizin, *ad.split("/")), hedef)
         except Exception as e:
             for ad in yedeklenen:
                 try:
-                    shutil.copy2(os.path.join(yedek_dizin, ad),
-                                 os.path.join(hedef_dizin, ad))
+                    shutil.copy2(os.path.join(yedek_dizin, *ad.split("/")),
+                                 os.path.join(hedef_dizin, *ad.split("/")))
                 except Exception:
                     pass
             return False, (f"Kurulum sırasında hata ({e}). Önceki sürüm "

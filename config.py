@@ -115,7 +115,7 @@ class Config:
                                 "?title=%5B%C3%87eviri%20Paketi%5D%20Oyun%20Ad%C4%B1"
                                 "&body=Oyun%3A%20...%0AKaynak%20dil%3A%20en%0AHedef%20dil%3A%20tr%0A%0A"
                                 "Paket%20dosyas%C4%B1n%C4%B1%20buraya%20s%C3%BCr%C3%BCkleyin.")
-    VERSION = "1.1.7" # Mevcut versiyonu burada tutalım
+    VERSION = "1.1.6" # Mevcut versiyonu burada tutalım
     THEME_COLOR = "#00aaff" # Varsayılan tema rengi
 
     @staticmethod
