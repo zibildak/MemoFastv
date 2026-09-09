@@ -1,13 +1,14 @@
 {
-  "surum": "1.1.8",
+  "surum": "1.1.9",
   "notlar": [
-    "Guncelleme sistemi artik alt klasorleri de yenileyebiliyor (gui, unity, gemma)",
-    "Bu surumden sonra Unity tam ceviri duzeltmeleri de kullanicilara ulasabilecek",
-    "Ceviri dayanikliligi iyilestirmeleri korundu"
+    "Cevirilerin cogunda cikan 'Hata: No translation was found' sorunu giderildi",
+    "Google'in kapattigi ceviri adresi yerine calisan adres kullaniliyor; bir adres olurse motor otomatik yedege geciyor",
+    "Unity tam ceviri, Unreal, Ren'Py, RPG Maker ve ekran cevirisi bu duzeltmeden yararlaniyor",
+    "Isteyenler icin Ayarlar'a resmi Google API anahtari alani eklendi (bos birakilirsa ucretsiz calisir)"
   ],
-  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.1.8.zip",
-  "sha256": "1bc991e8325432ede6b82d2eb6f306656a2c6ba754f547d24c953c81fc86828f",
-  "boyut": 278146,
+  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.1.9.zip",
+  "sha256": "cd502e49696eb187cdcc6319bd7919f9a6776808c231111c471182c86a803d39",
+  "boyut": 284986,
   "tam_kurulum_gerekli": false,
   "site": "https://zibildak.github.io/MemoFastv"
 }
