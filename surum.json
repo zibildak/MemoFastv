@@ -1,13 +1,12 @@
 {
-  "surum": "1.2.0",
+  "surum": "1.2.1",
   "notlar": [
-    "Sesli asistan artik her bilgisayarda calisiyor (mikrofon bulunamama sorunu giderildi)",
-    "Unreal oyunlarinda Devam Et sonrasi cevirinin bastan baslamasi duzeltildi",
-    "Bu surum TAM KURULUM gerektirir: siteden yeni surumu indirip kurun"
+    "Gemini/Google API anahtari artik 'AIza' ile baslamasa da kabul ediliyor (yeni anahtarlar kaydedilemiyordu)",
+    "Unreal: Devam Et sonrasi cevirinin bastan baslamasi duzeltildi"
   ],
-  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.1.9.zip",
-  "sha256": "cd502e49696eb187cdcc6319bd7919f9a6776808c231111c471182c86a803d39",
-  "boyut": 284986,
-  "tam_kurulum_gerekli": true,
+  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.2.1.zip",
+  "sha256": "bf3d083792339e01bf46b6ac2f018b644d85bb4451fa862884aac4bab000f24e",
+  "boyut": 304071,
+  "tam_kurulum_gerekli": false,
   "site": "https://zibildak.github.io/MemoFastv"
 }
