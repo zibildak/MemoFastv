@@ -1,14 +1,13 @@
 {
-  "surum": "1.1.9",
+  "surum": "1.2.0",
   "notlar": [
-    "Cevirilerin cogunda cikan 'Hata: No translation was found' sorunu giderildi",
-    "Google'in kapattigi ceviri adresi yerine calisan adres kullaniliyor; bir adres olurse motor otomatik yedege geciyor",
-    "Unity tam ceviri, Unreal, Ren'Py, RPG Maker ve ekran cevirisi bu duzeltmeden yararlaniyor",
-    "Isteyenler icin Ayarlar'a resmi Google API anahtari alani eklendi (bos birakilirsa ucretsiz calisir)"
+    "Sesli asistan artik her bilgisayarda calisiyor (mikrofon bulunamama sorunu giderildi)",
+    "Unreal oyunlarinda Devam Et sonrasi cevirinin bastan baslamasi duzeltildi",
+    "Bu surum TAM KURULUM gerektirir: siteden yeni surumu indirip kurun"
   ],
   "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.1.9.zip",
   "sha256": "cd502e49696eb187cdcc6319bd7919f9a6776808c231111c471182c86a803d39",
   "boyut": 284986,
-  "tam_kurulum_gerekli": false,
+  "tam_kurulum_gerekli": true,
   "site": "https://zibildak.github.io/MemoFastv"
 }
