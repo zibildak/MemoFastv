@@ -1,12 +1,12 @@
 {
-  "surum": "1.2.1",
+  "surum": "1.2.2",
   "notlar": [
-    "Gemini/Google API anahtari artik 'AIza' ile baslamasa da kabul ediliyor (yeni anahtarlar kaydedilemiyordu)",
-    "Unreal: Devam Et sonrasi cevirinin bastan baslamasi duzeltildi"
+    "Unity Tam Ceviri: taramanin sonsuza kadar beklemesi duzeltildi",
+    "Ren'Py: menu yazilari ve metin etiketleri daha dogru cevriliyor"
   ],
-  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.2.1.zip",
-  "sha256": "bf3d083792339e01bf46b6ac2f018b644d85bb4451fa862884aac4bab000f24e",
-  "boyut": 304071,
+  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.2.2.zip",
+  "sha256": "e0b9730ba76cf72c22c73d4761ac25ab1f0b7a7f8028a1daad17cfcc5669eaba",
+  "boyut": 308097,
   "tam_kurulum_gerekli": false,
   "site": "https://zibildak.github.io/MemoFastv"
 }
