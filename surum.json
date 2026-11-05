@@ -1,12 +1,12 @@
 {
-  "surum": "1.2.3",
+  "surum": "1.2.4",
   "notlar": [
-    "Unity: cevrilen dil dosyasini oyunun reddetmesi (bos metin) duzeltildi",
-    "Menu yazilari dogru cevriliyor (Load -> Yukle, Save -> Kaydet)"
+    "Unreal: ceviri sonrasi oyunun acilmamasi (Failed to read file .uproject hatasi) duzeltildi",
+    "Unreal: Oodle'li oyunlar artik Zlib ile paketleniyor, istersen kutucukla Oodle secilebilir"
   ],
-  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.2.3.zip",
-  "sha256": "01dbbf63b18a659c575b2680cb722ef0538ea66ff16148a7de905c0f2bee7b7c",
-  "boyut": 311270,
+  "paket_url": "https://github.com/zibildak/MemoFastv/releases/download/guncelleme/memofast_kod_1.2.4.zip",
+  "sha256": "164b94710a88fdfcc60f58b28381e4e7cf54e99b5d632b536e65e46d1ae405d4",
+  "boyut": 311778,
   "tam_kurulum_gerekli": false,
   "site": "https://zibildak.github.io/MemoFastv"
 }
